@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 
+@MainActor
 final class Capsomnia: NSObject, NSApplicationDelegate {
     private var lastAppliedState: Bool?
     private var failedSleepState: Bool?
@@ -16,6 +17,8 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     private var pollingTimer: Timer?
     private var signalSources: [DispatchSourceSignal] = []
     private var statusItem: NSStatusItem?
+    private var popover: NSPopover?
+    private var menuModel: MenuModel?
     private var settingsWindowController: SettingsWindowController?
     private let onImage = DotImage.make(color: Brand.led)
     private let offImage = DotImage.make(color: NSColor(calibratedWhite: 0.58, alpha: 1.0))
@@ -135,112 +138,83 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             button.title = ""
             button.imagePosition = .imageOnly
             button.toolTip = appName
+            button.target = self
+            button.action = #selector(togglePopover)
         }
 
-        rebuildStatusMenu()
+        setupPopover()
         updateStatus(capsLockOn: false)
     }
 
-    private func rebuildStatusMenu() {
-        guard let item = statusItem else { return }
+    private func setupPopover() {
+        let model = makeMenuModel()
+        menuModel = model
 
-        let strings = AppStrings.current()
-        let menu = NSMenu()
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.appearance = NSAppearance(named: .darkAqua)
+        popover.contentViewController = StatusPopoverController(model: model)
+        self.popover = popover
+    }
 
-        let heading = NSMenuItem(title: strings.keepAwakeHeading, action: nil, keyEquivalent: "")
-        heading.isEnabled = false
-        menu.addItem(heading)
-
-        let currentMode = Preferences.keepAwakeMode
-        let modeItems: [(KeepAwakeMode, String)] = [
-            (.off, strings.modeOff),
-            (.capsLock, strings.modeCapsLock),
-            (.auto, strings.modeAuto)
-        ]
-        for (mode, title) in modeItems {
-            let modeItem = NSMenuItem(title: title, action: #selector(selectMode), keyEquivalent: "")
-            modeItem.target = self
-            modeItem.representedObject = mode.rawValue
-            modeItem.state = currentMode == mode ? .on : .off
-            menu.addItem(modeItem)
+    private func makeMenuModel() -> MenuModel {
+        let model = MenuModel(strings: currentMenuStrings())
+        model.onSelectMode = { [weak self] mode in self?.setKeepAwakeMode(mode) }
+        model.onSetFloorEnabled = { [weak self] enabled in self?.setBatteryFloorEnabled(enabled) }
+        model.onSetFloorPercent = { [weak self] percent in
+            self?.setBatteryFloorEnabled(true)
+            self?.setBatteryFloorPercent(percent)
         }
+        model.onSetShowMenuBarIcon = { [weak self] enabled in self?.setShowMenuBarIcon(enabled) }
+        model.onSelectLanguage = { [weak self] language in self?.setLanguage(language) }
+        model.onOpenCapsomnia = { [weak self] in self?.openCapsomnia() }
+        model.onQuit = { [weak self] in self?.quit() }
+        syncMenuModel(model)
+        return model
+    }
 
-        let floorValue = Preferences.batteryFloorEnabled ? "\(Preferences.batteryFloorPercent)%" : strings.modeOff
-        let floorItem = NSMenuItem(title: "\(strings.batteryFloorMenu) (\(floorValue))", action: nil, keyEquivalent: "")
-        let floorSubmenu = NSMenu()
-        let floorOff = NSMenuItem(title: strings.modeOff, action: #selector(selectBatteryFloor), keyEquivalent: "")
-        floorOff.target = self
-        floorOff.representedObject = "off"
-        floorOff.state = Preferences.batteryFloorEnabled ? .off : .on
-        floorSubmenu.addItem(floorOff)
-        for percent in [10, 15, 20, 25, 30] {
-            let option = NSMenuItem(title: "\(percent)%", action: #selector(selectBatteryFloor), keyEquivalent: "")
-            option.target = self
-            option.representedObject = "\(percent)"
-            option.state = (Preferences.batteryFloorEnabled && Preferences.batteryFloorPercent == percent) ? .on : .off
-            floorSubmenu.addItem(option)
-        }
-        menu.setSubmenu(floorSubmenu, for: floorItem)
-        menu.addItem(floorItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        let showMenuBarItem = NSMenuItem(
-            title: strings.showMenuBarIcon,
-            action: #selector(toggleShowMenuBarIcon),
-            keyEquivalent: ""
+    private func currentMenuStrings() -> MenuStrings {
+        let s = AppStrings.current()
+        return MenuStrings(
+            appName: appName,
+            keepAwakeHeading: s.keepAwakeHeading,
+            modeOff: s.modeOff,
+            modeCapsLock: s.modeCapsLock,
+            modeAuto: s.modeAuto,
+            batteryFloorMenu: s.batteryFloorMenu,
+            showMenuBarIcon: s.showMenuBarIcon,
+            language: s.language,
+            openCapsomnia: s.openCapsomnia,
+            quit: s.quit
         )
-        showMenuBarItem.target = self
-        showMenuBarItem.state = Preferences.showMenuBarIcon ? .on : .off
-        menu.addItem(showMenuBarItem)
-
-        let languageItem = NSMenuItem(title: strings.language, action: nil, keyEquivalent: "")
-        let languageMenu = NSMenu(title: strings.language)
-        for language in AppLanguage.allCases {
-            let item = NSMenuItem(
-                title: language.displayName,
-                action: #selector(selectLanguage),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = language.rawValue
-            item.state = Preferences.language == language ? .on : .off
-            languageMenu.addItem(item)
-        }
-        menu.setSubmenu(languageMenu, for: languageItem)
-        menu.addItem(languageItem)
-
-        let openItem = NSMenuItem(title: strings.openCapsomnia, action: #selector(openCapsomnia), keyEquivalent: "o")
-        openItem.target = self
-        menu.addItem(openItem)
-        menu.addItem(NSMenuItem.separator())
-
-        let quitItem = NSMenuItem(title: strings.quit, action: #selector(quit), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-
-        item.menu = menu
     }
 
-    @objc private func toggleShowMenuBarIcon() {
-        setShowMenuBarIcon(!Preferences.showMenuBarIcon)
+    private func syncMenuModel(_ model: MenuModel) {
+        model.strings = currentMenuStrings()
+        model.mode = Preferences.keepAwakeMode
+        model.floorEnabled = Preferences.batteryFloorEnabled
+        model.floorPercent = Preferences.batteryFloorPercent
+        model.showMenuBarIcon = Preferences.showMenuBarIcon
+        model.language = Preferences.language
+        model.keepingAwake = currentCapsLockState
     }
 
-    @objc private func selectMode(_ sender: NSMenuItem) {
-        guard let rawValue = sender.representedObject as? String,
-              let mode = KeepAwakeMode(rawValue: rawValue) else {
-            return
-        }
-        setKeepAwakeMode(mode)
+    /// Kept as the single "menu changed" entry point so the existing setters can call it
+    /// exactly where they used to rebuild the NSMenu; now it just refreshes the live model.
+    private func rebuildStatusMenu() {
+        guard let model = menuModel else { return }
+        syncMenuModel(model)
     }
 
-    @objc private func selectBatteryFloor(_ sender: NSMenuItem) {
-        guard let rawValue = sender.representedObject as? String else { return }
-        if rawValue == "off" {
-            setBatteryFloorEnabled(false)
-        } else if let percent = Int(rawValue) {
-            setBatteryFloorEnabled(true)
-            setBatteryFloorPercent(percent)
+    @objc private func togglePopover() {
+        guard let button = statusItem?.button, let popover else { return }
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            rebuildStatusMenu()
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.makeKey()
         }
     }
 
@@ -269,15 +243,6 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         rebuildStatusMenu()
         applyCurrentCapsLockState(reason: "battery_floor_percent")
         log("preference battery_floor_percent=\(percent)")
-    }
-
-    @objc private func selectLanguage(_ sender: NSMenuItem) {
-        guard let rawValue = sender.representedObject as? String,
-              let language = AppLanguage(rawValue: rawValue) else {
-            return
-        }
-
-        setLanguage(language)
     }
 
     @objc private func openCapsomnia() {
@@ -369,7 +334,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     private func installPollingMonitor() {
         pollingTimer?.invalidate()
         let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
-            self?.applyCurrentCapsLockState(reason: "poll")
+            MainActor.assumeIsolated { self?.applyCurrentCapsLockState(reason: "poll") }
         }
         timer.tolerance = 0.05
         pollingTimer = timer
@@ -495,6 +460,9 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         failedSleepState = nil
         nextSleepStateRetryAt = .distantPast
         nextSleepStateVerificationAt = now.addingTimeInterval(sleepStateVerificationInterval)
+        // Keep the popover's status pill / LED live even while it is open (e.g. the
+        // battery floor releasing keep-awake flips it to OFF without a reopen).
+        menuModel?.keepingAwake = capsLockOn
         syncStatusItemVisibility()
         evaluateDisplaySleepForClosedLid(capsLockOn: capsLockOn, reason: reason)
     }
