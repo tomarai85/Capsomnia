@@ -26,7 +26,7 @@ func brandCard() -> NSView {
     view.wantsLayer = true
     // Translucent so the window's vibrancy reads through as layered glass, matching
     // the menu-bar popover.
-    view.layer?.backgroundColor = Brand.surface2.withAlphaComponent(0.55).cgColor
+    view.layer?.backgroundColor = Brand.surface2.withAlphaComponent(0.28).cgColor
     view.layer?.cornerRadius = 14
     view.layer?.borderWidth = 1
     view.layer?.borderColor = Brand.borderStrong.withAlphaComponent(0.6).cgColor

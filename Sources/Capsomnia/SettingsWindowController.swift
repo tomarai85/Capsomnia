@@ -199,7 +199,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // menu-bar popover), while the material still lets a hint of the desktop through.
         let tint = NSView()
         tint.wantsLayer = true
-        tint.layer?.backgroundColor = Brand.bg.withAlphaComponent(0.55).cgColor
+        tint.layer?.backgroundColor = Brand.bg.withAlphaComponent(0.12).cgColor
         tint.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(tint)
 

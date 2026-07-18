@@ -88,10 +88,10 @@ struct CapsomniaMenuView: View {
         .frame(width: menuWidth)
         .padding(.vertical, 8)
         .background(
-            // Brand-dark over the vibrancy so it reads as deep glass (CodexBar-dark),
-            // while the material still lets a hint of the desktop through.
+            // Barely-there brand wash so the frosted vibrancy dominates and the desktop
+            // clearly shows through — real glass, not a dark panel.
             LinearGradient(
-                colors: [Palette.bg.opacity(0.68), Palette.bg.opacity(0.52)],
+                colors: [Palette.bg.opacity(0.14), Palette.bg.opacity(0.06)],
                 startPoint: .top, endPoint: .bottom
             )
         )
