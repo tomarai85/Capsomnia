@@ -104,7 +104,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
-        window.backgroundColor = Brand.bg
+        window.backgroundColor = .clear
         window.appearance = NSAppearance(named: .darkAqua)
         window.standardWindowButton(.zoomButton)?.isHidden = true
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
@@ -189,9 +189,19 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func buildContent() {
-        let contentView = NSView()
+        let contentView = NSVisualEffectView()
+        contentView.material = .hudWindow
+        contentView.blendingMode = .behindWindow
+        contentView.state = .active
         contentView.wantsLayer = true
-        contentView.layer?.backgroundColor = Brand.bg.cgColor
+
+        // Dark tint over the vibrancy so the window reads as deep glass (matching the
+        // menu-bar popover), while the material still lets a hint of the desktop through.
+        let tint = NSView()
+        tint.wantsLayer = true
+        tint.layer?.backgroundColor = Brand.bg.withAlphaComponent(0.55).cgColor
+        tint.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(tint)
 
         headerIcon.image = BrandIcon.make(diameter: 60)
         headerIcon.translatesAutoresizingMaskIntoConstraints = false
@@ -233,6 +243,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         ]
 
         NSLayoutConstraint.activate([
+            tint.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            tint.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            tint.topAnchor.constraint(equalTo: contentView.topAnchor),
+            tint.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             rootStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 28),
             rootStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -28),
             rootStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 28),

@@ -24,10 +24,12 @@ func brandLabel(
 func brandCard() -> NSView {
     let view = NSView()
     view.wantsLayer = true
-    view.layer?.backgroundColor = Brand.surface.cgColor
+    // Translucent so the window's vibrancy reads through as layered glass, matching
+    // the menu-bar popover.
+    view.layer?.backgroundColor = Brand.surface2.withAlphaComponent(0.55).cgColor
     view.layer?.cornerRadius = 14
     view.layer?.borderWidth = 1
-    view.layer?.borderColor = Brand.border.cgColor
+    view.layer?.borderColor = Brand.borderStrong.withAlphaComponent(0.6).cgColor
     view.translatesAutoresizingMaskIntoConstraints = false
     return view
 }

@@ -19,11 +19,11 @@ final class LEDToggle: NSView {
 
         track.frame = NSRect(x: 0, y: 0, width: 42, height: 24)
         track.cornerRadius = 12
+        track.borderWidth = 1
         layer?.addSublayer(track)
 
         knob.frame = NSRect(x: 3, y: 3, width: 18, height: 18)
         knob.cornerRadius = 9
-        knob.backgroundColor = NSColor.white.cgColor
         knob.shadowColor = NSColor.black.cgColor
         knob.shadowOpacity = 0.35
         knob.shadowRadius = 2
@@ -54,7 +54,11 @@ final class LEDToggle: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(!animated)
         CATransaction.setAnimationDuration(0.18)
-        track.backgroundColor = (isOn ? Brand.led : Brand.offDot).cgColor
+        // Mirror the SwiftUI GlassToggle so both surfaces read identically: lime track +
+        // dark knob when on, dark surface track + light knob when off.
+        track.backgroundColor = (isOn ? Brand.led : Brand.surface2).cgColor
+        track.borderColor = (isOn ? Brand.led.withAlphaComponent(0.5) : Brand.border).cgColor
+        knob.backgroundColor = (isOn ? Brand.bg : NSColor.white.withAlphaComponent(0.9)).cgColor
         knob.frame.origin.x = isOn ? 21 : 3
         CATransaction.commit()
     }
