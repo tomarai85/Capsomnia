@@ -475,4 +475,53 @@ final class StatusPopoverController: NSViewController {
         // Re-fit in case content (expanded rows) changed the height.
         preferredContentSize = view.fittingSize
     }
+
+    /// The intro motion: the panel grows into place from its top edge (toward the
+    /// menu-bar item) while fading in.
+    ///
+    /// Why this is smooth where the built-in animation stuttered: `NSPopover`'s own
+    /// open animation resizes the *content view* from small to full, so `NSHostingView`
+    /// re-runs a full SwiftUI layout pass every frame (CPU work → dropped frames). Here
+    /// the popover shows with `animates = false`, so the content is laid out exactly
+    /// once at final size and the intro is two Core Animation layer animations (GPU-only,
+    /// no relayout) that run on the compositor at the display refresh rate.
+    ///
+    /// Both are *presentation-only*: the layer's model stays at identity / opacity 1, so
+    /// if an animation is ever dropped (rapid re-open, tracking races) the panel is
+    /// simply fully visible. It can never get stuck hidden — the earlier window-alpha
+    /// approach could leave a "shown" popover stuck at alpha 0, i.e. invisible.
+    func playOpenAnimation() {
+        guard let layer = view.layer else { return }
+        let bounds = layer.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return }
+
+        // Scale about the top-center so the panel appears to drop out of the menu bar.
+        // NSVisualEffectView's layer is not geometry-flipped, so the top edge is maxY.
+        let anchor = CGPoint(x: bounds.midX, y: bounds.maxY)
+        func transform(scale: CGFloat) -> CATransform3D {
+            var t = CATransform3DTranslate(CATransform3DIdentity, anchor.x, anchor.y, 0)
+            t = CATransform3DScale(t, scale, scale, 1)
+            return CATransform3DTranslate(t, -anchor.x, -anchor.y, 0)
+        }
+
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.0
+        fade.toValue = 1.0
+        fade.duration = 0.20
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(fade, forKey: "open-fade")
+
+        // Reduce Motion: keep the opacity reveal (a cross-fade is motion-safe) but drop
+        // the scale. Direct Core Animation is not auto-suppressed by the accessibility
+        // preference, so we gate it ourselves.
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+
+        let grow = CABasicAnimation(keyPath: "transform")
+        grow.fromValue = NSValue(caTransform3D: transform(scale: 0.94))
+        grow.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        grow.duration = 0.22
+        // Gentle decelerate — settles without an overshoot wobble.
+        grow.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)
+        layer.add(grow, forKey: "open-grow")
+    }
 }

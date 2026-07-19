@@ -152,7 +152,11 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
 
         let popover = NSPopover()
         popover.behavior = .transient
-        popover.animates = true
+        // The built-in animation scales the whole window open; with a behind-window
+        // vibrancy panel that forces a backdrop reblur + SwiftUI relayout every frame,
+        // which stutters. We show at final size instantly and fade the window in
+        // ourselves (compositor-only, so it runs at the display refresh rate).
+        popover.animates = false
         popover.appearance = NSAppearance(named: .darkAqua)
         popover.contentViewController = StatusPopoverController(model: model)
         self.popover = popover
@@ -215,6 +219,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             rebuildStatusMenu()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
+            (popover.contentViewController as? StatusPopoverController)?.playOpenAnimation()
         }
     }
 
