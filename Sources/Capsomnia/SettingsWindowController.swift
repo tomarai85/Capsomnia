@@ -62,6 +62,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let rootStack = NSStackView()
     private let bodyStack = NSStackView()
     private var preferencesCard = NSView()
+    /// The container the glass backdrop wraps; the measurement target for `resizeToFit`.
+    private var contentContainer: NSView?
     private var initialPreferencesLayoutConstraints: [NSLayoutConstraint] = []
     private var settingsLayoutConstraints: [NSLayoutConstraint] = []
 
@@ -179,7 +181,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func resizeToFit() {
-        guard let window, let contentView = window.contentView else { return }
+        // Measured on the content container, not `window.contentView`: the latter is the
+        // glass backdrop, which owns its content's layout and does not report a usable
+        // fitting size of its own.
+        guard let window, let contentView = contentContainer else { return }
         let width = Self.settingsContentWidth
         let currentHeight = max(contentView.bounds.height, 1)
         window.setContentSize(NSSize(width: width, height: currentHeight))
@@ -189,21 +194,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func buildContent() {
-        let contentView = NSVisualEffectView()
-        // Same reasoning as the menu popover: .hudWindow is a dense scrim that caps the
-        // glass. .underWindowBackground lets the desktop actually read through.
-        contentView.material = .underWindowBackground
-        contentView.blendingMode = .behindWindow
-        contentView.state = .active
+        // Plain container: the glass is applied around it by GlassBackdrop below, which
+        // keeps this method's constraints independent of which backdrop the OS supports.
+        let contentView = NSView()
         contentView.wantsLayer = true
+        contentContainer = contentView
 
-        // Dark tint over the vibrancy so the window reads as deep glass (matching the
-        // menu-bar popover), while the material still lets a hint of the desktop through.
-        let tint = NSView()
-        tint.wantsLayer = true
-        tint.layer?.backgroundColor = Brand.bg.withAlphaComponent(0.06).cgColor
-        tint.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(tint)
+        // Dark tint so legacy vibrancy reads as deep glass (matching the menu-bar
+        // popover). Real Liquid Glass has its own depth, and this tint would only cancel
+        // out its transparency, so it is confined to the fallback path.
+        if !GlassBackdrop.usesLiquidGlass {
+            let tint = NSView()
+            tint.wantsLayer = true
+            tint.layer?.backgroundColor = Brand.bg.withAlphaComponent(0.06).cgColor
+            tint.translatesAutoresizingMaskIntoConstraints = false
+            contentView.addSubview(tint)
+            NSLayoutConstraint.activate([
+                tint.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+                tint.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+                tint.topAnchor.constraint(equalTo: contentView.topAnchor),
+                tint.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
+            ])
+        }
 
         headerIcon.image = BrandIcon.make(diameter: 60)
         headerIcon.translatesAutoresizingMaskIntoConstraints = false
@@ -231,7 +243,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         rootStack.setCustomSpacing(20, after: header)
 
         contentView.addSubview(rootStack)
-        window?.contentView = contentView
+        // cornerRadius 0: the window already masks its content to the titled-window shape.
+        window?.contentView = GlassBackdrop.wrap(contentView, cornerRadius: 0)
 
         initialPreferencesLayoutConstraints = [
             explainerCard.widthAnchor.constraint(equalTo: bodyStack.widthAnchor),
@@ -245,10 +258,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         ]
 
         NSLayoutConstraint.activate([
-            tint.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            tint.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            tint.topAnchor.constraint(equalTo: contentView.topAnchor),
-            tint.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             rootStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 28),
             rootStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -28),
             rootStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 28),

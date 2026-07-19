@@ -63,6 +63,9 @@ private let menuWidth: CGFloat = 300
 
 struct CapsomniaMenuView: View {
     @ObservedObject var model: MenuModel
+    /// Paints the brand wash behind the menu. Only wanted over legacy vibrancy — real
+    /// Liquid Glass supplies its own depth, and the wash would flatten it.
+    var tinted: Bool = true
     @State private var floorExpanded = false
     @State private var languageExpanded = false
 
@@ -87,14 +90,16 @@ struct CapsomniaMenuView: View {
         }
         .frame(width: menuWidth)
         .padding(.vertical, 8)
-        .background(
-            // Barely-there brand wash so the frosted vibrancy dominates and the desktop
-            // clearly shows through — real glass, not a dark panel.
-            LinearGradient(
-                colors: [Palette.bg.opacity(0.08), Palette.bg.opacity(0.02)],
-                startPoint: .top, endPoint: .bottom
-            )
-        )
+        .background {
+            if tinted {
+                // Barely-there brand wash so the frosted vibrancy dominates and the
+                // desktop still shows through — real glass, not a dark panel.
+                LinearGradient(
+                    colors: [Palette.bg.opacity(0.08), Palette.bg.opacity(0.02)],
+                    startPoint: .top, endPoint: .bottom
+                )
+            }
+        }
     }
 
     // MARK: Header
@@ -440,6 +445,7 @@ private struct HoverRow<Content: View>: View {
 @MainActor
 final class StatusPopoverController: NSViewController {
     let model: MenuModel
+    private var hostingView: NSHostingView<CapsomniaMenuView>?
 
     init(model: MenuModel) {
         self.model = model
@@ -450,34 +456,41 @@ final class StatusPopoverController: NSViewController {
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
-        let effect = NSVisualEffectView()
-        // .hudWindow is a dense HUD scrim — it deliberately blocks the backdrop so a
-        // heads-up panel stays readable over anything, which caps how much glass you can
-        // get no matter how light the tint above it is. .underWindowBackground is the
-        // most transparent stock material, so the desktop actually reads through.
-        effect.material = .underWindowBackground
-        effect.blendingMode = .behindWindow
-        effect.state = .active
-        effect.wantsLayer = true
+        // The brand wash only exists to give legacy vibrancy some depth; over real glass
+        // it would cancel out the transparency, so it is dropped on the Liquid Glass path.
+        let host = NSHostingView(
+            rootView: CapsomniaMenuView(model: model, tinted: !GlassBackdrop.usesLiquidGlass)
+        )
+        self.hostingView = host
 
-        let host = NSHostingView(rootView: CapsomniaMenuView(model: model))
-        host.translatesAutoresizingMaskIntoConstraints = false
-        effect.addSubview(host)
+        // cornerRadius 0: NSPopover already masks its content to the popover shape.
+        let backdrop = GlassBackdrop.wrap(host, cornerRadius: 0)
+        backdrop.translatesAutoresizingMaskIntoConstraints = false
+
+        let root = MenuRootView()
+        root.wantsLayer = true
+        root.onOpenCapsomnia = { [weak self] in self?.model.onOpenCapsomnia() }
+        root.onQuit = { [weak self] in self?.model.onQuit() }
+        root.addSubview(backdrop)
         NSLayoutConstraint.activate([
-            host.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            host.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            host.topAnchor.constraint(equalTo: effect.topAnchor),
-            host.bottomAnchor.constraint(equalTo: effect.bottomAnchor)
+            backdrop.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            backdrop.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            backdrop.topAnchor.constraint(equalTo: root.topAnchor),
+            backdrop.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
 
-        view = effect
+        view = root
         preferredContentSize = host.fittingSize
     }
 
     override func viewWillAppear() {
         super.viewWillAppear()
-        // Re-fit in case content (expanded rows) changed the height.
-        preferredContentSize = view.fittingSize
+        // Re-fit in case content (expanded rows) changed the height. Measured on the
+        // hosting view rather than `view`, because the glass backdrop owns its content's
+        // layout and does not necessarily report a useful fitting size itself.
+        if let hostingView {
+            preferredContentSize = hostingView.fittingSize
+        }
     }
 
     /// The intro motion: the panel grows into place from its top edge (toward the

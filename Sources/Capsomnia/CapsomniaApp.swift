@@ -51,7 +51,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         syncStatusItemVisibility()
         installSignalHandlers()
         installPollingMonitor()
-        log("start")
+        log("start backdrop=\(GlassBackdrop.usesLiquidGlass ? "liquid_glass" : "vibrancy")")
         applyCurrentCapsLockState(reason: "startup")
 
         if shouldShowInitialSetup {
