@@ -91,7 +91,7 @@ struct CapsomniaMenuView: View {
             // Barely-there brand wash so the frosted vibrancy dominates and the desktop
             // clearly shows through — real glass, not a dark panel.
             LinearGradient(
-                colors: [Palette.bg.opacity(0.14), Palette.bg.opacity(0.06)],
+                colors: [Palette.bg.opacity(0.08), Palette.bg.opacity(0.02)],
                 startPoint: .top, endPoint: .bottom
             )
         )
@@ -451,7 +451,11 @@ final class StatusPopoverController: NSViewController {
 
     override func loadView() {
         let effect = NSVisualEffectView()
-        effect.material = .hudWindow
+        // .hudWindow is a dense HUD scrim — it deliberately blocks the backdrop so a
+        // heads-up panel stays readable over anything, which caps how much glass you can
+        // get no matter how light the tint above it is. .underWindowBackground is the
+        // most transparent stock material, so the desktop actually reads through.
+        effect.material = .underWindowBackground
         effect.blendingMode = .behindWindow
         effect.state = .active
         effect.wantsLayer = true

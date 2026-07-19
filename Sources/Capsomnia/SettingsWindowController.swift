@@ -190,7 +190,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     private func buildContent() {
         let contentView = NSVisualEffectView()
-        contentView.material = .hudWindow
+        // Same reasoning as the menu popover: .hudWindow is a dense scrim that caps the
+        // glass. .underWindowBackground lets the desktop actually read through.
+        contentView.material = .underWindowBackground
         contentView.blendingMode = .behindWindow
         contentView.state = .active
         contentView.wantsLayer = true
@@ -199,7 +201,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // menu-bar popover), while the material still lets a hint of the desktop through.
         let tint = NSView()
         tint.wantsLayer = true
-        tint.layer?.backgroundColor = Brand.bg.withAlphaComponent(0.12).cgColor
+        tint.layer?.backgroundColor = Brand.bg.withAlphaComponent(0.06).cgColor
         tint.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(tint)
 
