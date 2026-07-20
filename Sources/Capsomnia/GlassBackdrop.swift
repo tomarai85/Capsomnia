@@ -19,16 +19,20 @@ enum GlassBackdrop {
         return false
     }
 
-    /// How much of the app's own dark surface is carried into the glass.
+    /// Opacity of the inner working panel. Near-solid on purpose.
     ///
-    /// Liquid Glass adapts to whatever is behind the window. This app is near-black with a
-    /// single lime accent, so with no tint at all its panels take their colour entirely from
-    /// the desktop behind them and the UI stops feeling like the app. A tint restores that
-    /// identity and buys contrast for the text sitting on it.
-    ///
-    /// Tuning: raise toward 1 for a more solid panel, lower toward 0 for more see-through.
-    /// This is the one number to change; everything else about the backdrop is Apple's.
-    private static let tintStrength: CGFloat = 0.38
+    /// Glass shows whatever is behind it, so a translucent surface reads dark over a dark desktop
+    /// and bright over a white page — measured, a 0.38 full-surface tint moved the panel's inner
+    /// luminance from 3 over black to 177 over white, which is the bright page bleeding through the
+    /// top of the popover (Tom, 2026-07-21). The working surface must NOT do that: it is where text
+    /// and controls live and it has to stay the app's near-black regardless of what is behind the
+    /// window. At 0.98 the same black/white swing is 9.7 vs 18.1 — a delta of 8 instead of 174.
+    private static let panelOpacity: CGFloat = 0.98
+
+    /// Width of the exposed glass rim around the working panel. This margin is where real Liquid
+    /// Glass still shows — its lensing, edge highlight and shadow — while the inset panel it frames
+    /// carries the content. Glass as the frame, solid panel as the surface (Codex review, 2026-07-21).
+    private static let rimInset: CGFloat = 8
 
     /// Wraps `content` in glass and returns the view to install as the window or popover
     /// content view.
@@ -46,24 +50,34 @@ enum GlassBackdrop {
             // are exactly the case regular exists for. Shipping clear made both of them hard
             // to work in (Tom, 2026-07-20).
             glass.style = .regular
-            // The tint rides INSIDE the content, not on `glass.tintColor`.
+            // Glass frames a solid panel; it is not the working surface itself.
             //
-            // Measured on macOS 26.5 with a standalone harness: with the tint set on the glass, the
-            // panel's mean luminance jumps from 17.2 to 61.6 the moment the window stops being key
-            // — the system drops the glass's own tint when inactive, so the surface visibly pales
-            // when you click anything else (Tom, 2026-07-20: "the look changes a lot"). Moving the
-            // same tint into the content the glass composites cuts that shift from +44 to +17 while
-            // leaving the active appearance where it was (15.6 vs 17.2, indistinguishable).
+            // A single translucent tint over the whole surface cannot win: measured over black vs
+            // white backgrounds it swings 3 -> 177 in inner luminance, which is the bright page
+            // behind the window bleeding through the sparse top of the popover. Insetting a
+            // near-opaque panel and letting glass show only in the rim brings that swing to 9.7 ->
+            // 18.1, so the surface you read and click on stays the app's near-black over ANY
+            // background, while the rim still refracts, highlights and shadows as real Liquid Glass.
             //
-            // The residual shift is Liquid Glass itself: NSGlassEffectView exposes only
-            // contentView / cornerRadius / tintColor / style, with no equivalent of the legacy
-            // `NSVisualEffectView.state = .active` that pins appearance across activation. Pinning
-            // it to vibrancy instead measured a perfect 0.00 shift, but stops being real glass.
-            let scrim = NSView(frame: content.bounds)
-            scrim.autoresizingMask = [.width, .height]
-            scrim.wantsLayer = true
-            scrim.layer?.backgroundColor = Brand.bg.withAlphaComponent(Self.tintStrength).cgColor
-            content.addSubview(scrim, positioned: .below, relativeTo: nil)
+            // Pinned with constraints, not a frame: the popover's content is an NSHostingView whose
+            // bounds are zero at wrap time, so a frame-sized child would start collapsed.
+            // Only the rounded popover shows a glass rim; a titled window (cornerRadius 0) already
+            // has its own frame as the boundary, so an inner margin there would just read as a bug.
+            let inset = cornerRadius > 0 ? Self.rimInset : 0
+            let panel = NSView()
+            panel.translatesAutoresizingMaskIntoConstraints = false
+            panel.wantsLayer = true
+            panel.layer?.backgroundColor = Brand.bg.withAlphaComponent(Self.panelOpacity).cgColor
+            // Concentric with the outer glass corner, minus the rim, so the rounded panel nests
+            // inside the rounded glass instead of poking square corners into it.
+            panel.layer?.cornerRadius = max(0, cornerRadius - inset)
+            content.addSubview(panel, positioned: .below, relativeTo: nil)
+            NSLayoutConstraint.activate([
+                panel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: inset),
+                panel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -inset),
+                panel.topAnchor.constraint(equalTo: content.topAnchor, constant: inset),
+                panel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -inset)
+            ])
             glass.cornerRadius = cornerRadius
             glass.contentView = content
             glass.wantsLayer = true
