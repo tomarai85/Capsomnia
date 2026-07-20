@@ -28,7 +28,7 @@ enum GlassBackdrop {
     ///
     /// Tuning: raise toward 1 for a more solid panel, lower toward 0 for more see-through.
     /// This is the one number to change; everything else about the backdrop is Apple's.
-    private static let tintStrength: CGFloat = 0.55
+    private static let tintStrength: CGFloat = 0.38
 
     /// Wraps `content` in glass and returns the view to install as the window or popover
     /// content view.
