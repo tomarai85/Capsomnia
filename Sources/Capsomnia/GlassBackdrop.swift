@@ -46,10 +46,24 @@ enum GlassBackdrop {
             // are exactly the case regular exists for. Shipping clear made both of them hard
             // to work in (Tom, 2026-07-20).
             glass.style = .regular
-            // Tint through the glass's own property rather than stacking a tint view on top:
-            // Apple explicitly discourages glass over glass, and setting contentView lets
-            // AppKit apply its own legibility treatment to what is inside.
-            glass.tintColor = Brand.bg.withAlphaComponent(Self.tintStrength)
+            // The tint rides INSIDE the content, not on `glass.tintColor`.
+            //
+            // Measured on macOS 26.5 with a standalone harness: with the tint set on the glass, the
+            // panel's mean luminance jumps from 17.2 to 61.6 the moment the window stops being key
+            // — the system drops the glass's own tint when inactive, so the surface visibly pales
+            // when you click anything else (Tom, 2026-07-20: "the look changes a lot"). Moving the
+            // same tint into the content the glass composites cuts that shift from +44 to +17 while
+            // leaving the active appearance where it was (15.6 vs 17.2, indistinguishable).
+            //
+            // The residual shift is Liquid Glass itself: NSGlassEffectView exposes only
+            // contentView / cornerRadius / tintColor / style, with no equivalent of the legacy
+            // `NSVisualEffectView.state = .active` that pins appearance across activation. Pinning
+            // it to vibrancy instead measured a perfect 0.00 shift, but stops being real glass.
+            let scrim = NSView(frame: content.bounds)
+            scrim.autoresizingMask = [.width, .height]
+            scrim.wantsLayer = true
+            scrim.layer?.backgroundColor = Brand.bg.withAlphaComponent(Self.tintStrength).cgColor
+            content.addSubview(scrim, positioned: .below, relativeTo: nil)
             glass.cornerRadius = cornerRadius
             glass.contentView = content
             glass.wantsLayer = true
