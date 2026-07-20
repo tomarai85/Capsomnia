@@ -79,6 +79,7 @@ struct CapsomniaMenuView: View {
     var tinted: Bool = true
     var onContentHeightChange: (CGFloat) -> Void = { _ in }
     @State private var customFloorText = ""
+    @State private var editingCustomFloor = false
     @FocusState private var customFieldFocused: Bool
 
     /// 30 used to sit here; it is reachable by typing, and the slot buys a free-entry field.
@@ -238,7 +239,6 @@ struct CapsomniaMenuView: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 6)
-            .onAppear { customFloorText = usingCustomFloor ? "\(model.floorPercent)" : "" }
         }
     }
 
@@ -248,42 +248,48 @@ struct CapsomniaMenuView: View {
         model.floorEnabled && !floorOptions.contains(model.floorPercent)
     }
 
-    /// Free-entry floor. Commits on Return or when focus leaves, so a half-typed number
-    /// never lands: "3" on its way to "35" would otherwise clamp to the 5% minimum.
+    /// Free-entry floor slot. At rest it is a pill like its neighbors (showing the
+    /// custom value when one is active, "···" otherwise); clicking it switches to a
+    /// text field — entry mode is something the user asks for, never the default.
+    /// Commits on Return or when focus leaves, so a half-typed number never lands:
+    /// "3" on its way to "35" would otherwise clamp to the 5% minimum.
+    @ViewBuilder
     private var customFloorField: some View {
-        TextField("", text: $customFloorText)
-            .textFieldStyle(.plain)
-            .multilineTextAlignment(.center)
-            .font(.system(size: 11.5, weight: usingCustomFloor ? .semibold : .regular))
-            .foregroundStyle(usingCustomFloor ? Palette.bg : Palette.text)
-            .tint(Palette.led)
-            .focused($customFieldFocused)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 5)
-            .background(
-                Capsule().fill(usingCustomFloor ? Palette.led : Color.white.opacity(0.06))
-            )
-            .overlay {
-                if customFloorText.isEmpty && !customFieldFocused {
-                    Text("··")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Palette.textFaint)
-                        .allowsHitTesting(false)
+        if editingCustomFloor {
+            TextField("", text: $customFloorText)
+                .textFieldStyle(.plain)
+                .multilineTextAlignment(.center)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Palette.text)
+                .tint(Palette.led)
+                .focused($customFieldFocused)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Color.white.opacity(0.10)))
+                .overlay(Capsule().strokeBorder(Palette.led.opacity(0.8), lineWidth: 1))
+                .onAppear { customFieldFocused = true }
+                .onSubmit { commitCustomFloor() }
+                .onChange(of: customFieldFocused) { _, focused in
+                    if !focused { commitCustomFloor() }
                 }
+        } else {
+            floorPill(
+                title: usingCustomFloor ? "\(model.floorPercent)" : "···",
+                active: usingCustomFloor
+            ) {
+                customFloorText = usingCustomFloor ? "\(model.floorPercent)" : ""
+                editingCustomFloor = true
             }
-            .onSubmit { commitCustomFloor() }
-            .onChange(of: customFieldFocused) { _, focused in
-                if !focused { commitCustomFloor() }
-            }
+        }
     }
 
     private func commitCustomFloor() {
-        guard let percent = BatteryFloorInput.parse(customFloorText) else {
-            // Not a number: restore what is actually in effect rather than leaving junk.
-            customFloorText = usingCustomFloor ? "\(model.floorPercent)" : ""
-            return
+        defer {
+            editingCustomFloor = false
+            customFieldFocused = false
         }
-        customFloorText = "\(percent)"
+        // Not a number: fall back to whatever is actually in effect, silently.
+        guard let percent = BatteryFloorInput.parse(customFloorText) else { return }
         model.onSetFloorEnabled(true)
         model.onSetFloorPercent(percent)
     }
@@ -504,8 +510,9 @@ final class StatusPopoverController: NSViewController {
         )
         self.hostingView = host
 
-        // cornerRadius 0: NSPopover already masks its content to the popover shape.
-        let backdrop = GlassBackdrop.wrap(host, cornerRadius: 0)
+        // The menu panel is borderless and does no masking of its own, so the glass
+        // supplies the rounded shape (NSPopover used to mask this to its popover shape).
+        let backdrop = GlassBackdrop.wrap(host, cornerRadius: 13)
         backdrop.translatesAutoresizingMaskIntoConstraints = false
 
         let root = MenuRootView()

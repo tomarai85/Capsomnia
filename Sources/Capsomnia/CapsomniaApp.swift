@@ -17,7 +17,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     private var pollingTimer: Timer?
     private var signalSources: [DispatchSourceSignal] = []
     private var statusItem: NSStatusItem?
-    private var popover: NSPopover?
+    private var menuPresenter: MenuPanelPresenter?
     private var menuModel: MenuModel?
     private var settingsWindowController: SettingsWindowController?
     private let onImage = DotImage.make(color: Brand.led)
@@ -149,23 +149,9 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     private func setupPopover() {
         let model = makeMenuModel()
         menuModel = model
-
-        let popover = NSPopover()
-        popover.behavior = .transient
-        // The built-in animation scales the whole window open; with a behind-window
-        // vibrancy panel that forces a backdrop reblur + SwiftUI relayout every frame,
-        // which stutters. We show at final size instantly and fade the window in
-        // ourselves (compositor-only, so it runs at the display refresh rate).
-        popover.animates = false
-        popover.appearance = NSAppearance(named: .darkAqua)
-        let controller = StatusPopoverController(model: model)
-        controller.onContentSizeChanged = { [weak self] in
-            guard let self, let popover = self.popover, popover.isShown,
-                  let button = self.statusItem?.button else { return }
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        }
-        popover.contentViewController = controller
-        self.popover = popover
+        // A panel we place and resize ourselves, instead of NSPopover: AppKit re-places
+        // a popover whose content size changes and lands on the wrong display.
+        menuPresenter = MenuPanelPresenter(controller: StatusPopoverController(model: model))
     }
 
     private func makeMenuModel() -> MenuModel {
@@ -218,14 +204,12 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePopover() {
-        guard let button = statusItem?.button, let popover else { return }
-        if popover.isShown {
-            popover.performClose(nil)
+        guard let button = statusItem?.button, let menuPresenter else { return }
+        if menuPresenter.isShown {
+            menuPresenter.close()
         } else {
             rebuildStatusMenu()
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
-            (popover.contentViewController as? StatusPopoverController)?.playOpenAnimation()
+            menuPresenter.show(under: button)
         }
     }
 
