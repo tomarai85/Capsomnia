@@ -78,8 +78,6 @@ struct CapsomniaMenuView: View {
     /// Liquid Glass supplies its own depth, and the wash would flatten it.
     var tinted: Bool = true
     var onContentHeightChange: (CGFloat) -> Void = { _ in }
-    @State private var floorExpanded = false
-    @State private var languageExpanded = false
     @State private var customFloorText = ""
     @FocusState private var customFieldFocused: Bool
 
@@ -203,53 +201,44 @@ struct CapsomniaMenuView: View {
 
     // MARK: Battery floor
 
+    /// The options are always on show rather than hidden behind a disclosure. Expanding a
+    /// row changes the popover's height, and `NSPopover` re-places itself when it resizes
+    /// — with several displays attached it lands on the wrong screen. A menu that never
+    /// changes height cannot be re-placed at all, and it costs one click less.
     private var batteryFloor: some View {
         VStack(spacing: 0) {
-            HoverRow {
-                withAnimation(.easeOut(duration: 0.16)) { floorExpanded.toggle() }
-            } content: { hovering in
-                HStack(spacing: 10) {
-                    Image(systemName: "battery.50")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Palette.textDim)
-                        .frame(width: 16)
-                    Text(model.strings.batteryFloorMenu)
-                        .font(.system(size: 13))
-                        .foregroundStyle(Palette.text)
-                    Spacer(minLength: 4)
-                    Text(model.floorEnabled ? "\(model.floorPercent)%" : model.strings.modeOff)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(model.floorEnabled ? Palette.led : Palette.textDim)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Palette.textFaint)
-                        .rotationEffect(.degrees(floorExpanded ? 180 : 0))
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(rowBackground(hovering: hovering, selected: false))
-                .padding(.horizontal, 8)
+            HStack(spacing: 10) {
+                Image(systemName: "battery.50")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.textDim)
+                    .frame(width: 16)
+                Text(model.strings.batteryFloorMenu)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.text)
+                Spacer(minLength: 4)
+                Text(model.floorEnabled ? "\(model.floorPercent)%" : model.strings.modeOff)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(model.floorEnabled ? Palette.led : Palette.textDim)
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 8)
 
-            if floorExpanded {
-                HStack(spacing: 6) {
-                    floorPill(title: model.strings.modeOff, active: !model.floorEnabled) {
-                        model.onSetFloorEnabled(false)
-                    }
-                    ForEach(floorOptions, id: \.self) { pct in
-                        floorPill(title: "\(pct)", active: model.floorEnabled && model.floorPercent == pct) {
-                            model.onSetFloorEnabled(true)
-                            model.onSetFloorPercent(pct)
-                        }
-                    }
-                    customFloorField
+            HStack(spacing: 6) {
+                floorPill(title: model.strings.modeOff, active: !model.floorEnabled) {
+                    model.onSetFloorEnabled(false)
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 2)
-                .padding(.bottom, 6)
-                .transition(.opacity.combined(with: .move(edge: .top)))
-                .onAppear { customFloorText = usingCustomFloor ? "\(model.floorPercent)" : "" }
+                ForEach(floorOptions, id: \.self) { pct in
+                    floorPill(title: "\(pct)", active: model.floorEnabled && model.floorPercent == pct) {
+                        model.onSetFloorEnabled(true)
+                        model.onSetFloorPercent(pct)
+                    }
+                }
+                customFloorField
             }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 6)
+            .onAppear { customFloorText = usingCustomFloor ? "\(model.floorPercent)" : "" }
         }
     }
 
@@ -283,7 +272,7 @@ struct CapsomniaMenuView: View {
                 }
             }
             .onSubmit { commitCustomFloor() }
-            .onChange(of: customFieldFocused) { focused in
+            .onChange(of: customFieldFocused) { _, focused in
                 if !focused { commitCustomFloor() }
             }
     }
@@ -335,61 +324,33 @@ struct CapsomniaMenuView: View {
 
     private var languageRow: some View {
         VStack(spacing: 0) {
-            HoverRow {
-                withAnimation(.easeOut(duration: 0.16)) { languageExpanded.toggle() }
-            } content: { hovering in
-                HStack(spacing: 10) {
-                    Image(systemName: "globe")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Palette.textDim)
-                        .frame(width: 16)
-                    Text(model.strings.language)
-                        .font(.system(size: 13))
-                        .foregroundStyle(Palette.text)
-                    Spacer(minLength: 4)
-                    Text(model.language.displayName)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Palette.textDim)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Palette.textFaint)
-                        .rotationEffect(.degrees(languageExpanded ? 180 : 0))
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(rowBackground(hovering: hovering, selected: false))
-                .padding(.horizontal, 8)
+            HStack(spacing: 10) {
+                Image(systemName: "globe")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Palette.textDim)
+                    .frame(width: 16)
+                Text(model.strings.language)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.text)
+                Spacer(minLength: 4)
+                Text(model.language.displayName)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Palette.textDim)
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 8)
 
-            if languageExpanded {
-                VStack(spacing: 1) {
-                    ForEach(AppLanguage.allCases, id: \.self) { lang in
-                        let selected = model.language == lang
-                        HoverRow {
-                            model.onSelectLanguage(lang)
-                        } content: { hovering in
-                            HStack {
-                                Text(lang.displayName)
-                                    .font(.system(size: 12, weight: selected ? .semibold : .regular))
-                                    .foregroundStyle(selected ? Palette.led : Palette.text.opacity(0.9))
-                                Spacer()
-                                if selected {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundStyle(Palette.led)
-                                }
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .background(rowBackground(hovering: hovering, selected: false))
-                            .padding(.horizontal, 8)
-                        }
+            // Same reasoning as the battery floor: always visible, so the height is fixed.
+            HStack(spacing: 6) {
+                ForEach(AppLanguage.allCases, id: \.self) { lang in
+                    floorPill(title: lang.displayName, active: model.language == lang) {
+                        model.onSelectLanguage(lang)
                     }
                 }
-                .padding(.leading, 22)
-                .padding(.bottom, 4)
-                .transition(.opacity.combined(with: .move(edge: .top)))
             }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 6)
         }
     }
 
