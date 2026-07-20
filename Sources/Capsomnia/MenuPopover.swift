@@ -80,8 +80,11 @@ struct CapsomniaMenuView: View {
     var onContentHeightChange: (CGFloat) -> Void = { _ in }
     @State private var floorExpanded = false
     @State private var languageExpanded = false
+    @State private var customFloorText = ""
+    @FocusState private var customFieldFocused: Bool
 
-    private let floorOptions = [10, 15, 20, 25, 30]
+    /// 30 used to sit here; it is reachable by typing, and the slot buys a free-entry field.
+    private let floorOptions = [10, 15, 20, 25]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -239,13 +242,61 @@ struct CapsomniaMenuView: View {
                             model.onSetFloorPercent(pct)
                         }
                     }
+                    customFloorField
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 2)
                 .padding(.bottom, 6)
                 .transition(.opacity.combined(with: .move(edge: .top)))
+                .onAppear { customFloorText = usingCustomFloor ? "\(model.floorPercent)" : "" }
             }
         }
+    }
+
+    /// True when the active floor is a value the preset pills cannot express, so the
+    /// typed field is the one that should read as selected.
+    private var usingCustomFloor: Bool {
+        model.floorEnabled && !floorOptions.contains(model.floorPercent)
+    }
+
+    /// Free-entry floor. Commits on Return or when focus leaves, so a half-typed number
+    /// never lands: "3" on its way to "35" would otherwise clamp to the 5% minimum.
+    private var customFloorField: some View {
+        TextField("", text: $customFloorText)
+            .textFieldStyle(.plain)
+            .multilineTextAlignment(.center)
+            .font(.system(size: 11.5, weight: usingCustomFloor ? .semibold : .regular))
+            .foregroundStyle(usingCustomFloor ? Palette.bg : Palette.text)
+            .tint(Palette.led)
+            .focused($customFieldFocused)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+            .background(
+                Capsule().fill(usingCustomFloor ? Palette.led : Color.white.opacity(0.06))
+            )
+            .overlay {
+                if customFloorText.isEmpty && !customFieldFocused {
+                    Text("··")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Palette.textFaint)
+                        .allowsHitTesting(false)
+                }
+            }
+            .onSubmit { commitCustomFloor() }
+            .onChange(of: customFieldFocused) { focused in
+                if !focused { commitCustomFloor() }
+            }
+    }
+
+    private func commitCustomFloor() {
+        guard let percent = BatteryFloorInput.parse(customFloorText) else {
+            // Not a number: restore what is actually in effect rather than leaving junk.
+            customFloorText = usingCustomFloor ? "\(model.floorPercent)" : ""
+            return
+        }
+        customFloorText = "\(percent)"
+        model.onSetFloorEnabled(true)
+        model.onSetFloorPercent(percent)
     }
 
     private func floorPill(title: String, active: Bool, action: @escaping () -> Void) -> some View {
@@ -466,6 +517,9 @@ private struct HoverRow<Content: View>: View {
 final class StatusPopoverController: NSViewController {
     let model: MenuModel
     private var hostingView: NSHostingView<CapsomniaMenuView>?
+    /// Called after the popover has been resized in place, so the owner can pin it back
+    /// to the status item. Set by whoever presents the popover.
+    var onContentSizeChanged: () -> Void = {}
 
     init(model: MenuModel) {
         self.model = model
@@ -525,6 +579,10 @@ final class StatusPopoverController: NSViewController {
         guard height > 0 else { return }
         guard abs(preferredContentSize.height - height) > 0.5 else { return }
         preferredContentSize = CGSize(width: menuWidth, height: height)
+        // AppKit re-places a resized popover itself, and with several displays attached it
+        // can put it at another screen's origin instead of back under the menu-bar item.
+        // Re-anchor on the next tick, once the new size has actually been applied.
+        DispatchQueue.main.async { [weak self] in self?.onContentSizeChanged() }
     }
 
     /// The intro motion: the panel grows into place from its top edge (toward the

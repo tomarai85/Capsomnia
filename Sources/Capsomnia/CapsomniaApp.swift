@@ -158,7 +158,13 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         // ourselves (compositor-only, so it runs at the display refresh rate).
         popover.animates = false
         popover.appearance = NSAppearance(named: .darkAqua)
-        popover.contentViewController = StatusPopoverController(model: model)
+        let controller = StatusPopoverController(model: model)
+        controller.onContentSizeChanged = { [weak self] in
+            guard let self, let popover = self.popover, popover.isShown,
+                  let button = self.statusItem?.button else { return }
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        }
+        popover.contentViewController = controller
         self.popover = popover
     }
 

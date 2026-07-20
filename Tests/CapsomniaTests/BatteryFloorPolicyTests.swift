@@ -83,4 +83,27 @@ final class BatteryFloorPolicyTests: XCTestCase {
         XCTAssertTrue(result.keepAwake)
         XCTAssertFalse(result.latched)
     }
+
+    // MARK: Typed battery-floor input
+
+    func testParseAcceptsPlainNumber() {
+        XCTAssertEqual(BatteryFloorInput.parse("35"), 35)
+    }
+
+    func testParseToleratesPercentSignAndWhitespace() {
+        XCTAssertEqual(BatteryFloorInput.parse("  40 % "), 40)
+    }
+
+    func testParseClampsInsteadOfRejectingOutOfRange() {
+        XCTAssertEqual(BatteryFloorInput.parse("99"), BatteryFloorInput.range.upperBound)
+        XCTAssertEqual(BatteryFloorInput.parse("0"), BatteryFloorInput.range.lowerBound)
+    }
+
+    func testParseRejectsNonNumericSoTheOldValueSurvives() {
+        XCTAssertNil(BatteryFloorInput.parse(""))
+        XCTAssertNil(BatteryFloorInput.parse("   "))
+        XCTAssertNil(BatteryFloorInput.parse("abc"))
+        XCTAssertNil(BatteryFloorInput.parse("1.5"))
+        XCTAssertNil(BatteryFloorInput.parse("-10"))
+    }
 }

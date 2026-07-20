@@ -170,6 +170,26 @@ enum BatteryReader {
     }
 }
 
+/// Turns whatever the user typed into the battery-floor field into a usable percentage.
+/// A floor of 0 would defeat the safety it exists for, and one near 100 would never let
+/// the Mac stay awake on battery at all, so values outside the band are pulled back in
+/// rather than rejected — typing 99 means "as high as it goes", not a silent no-op.
+enum BatteryFloorInput {
+    static let range = 5...90
+
+    /// Returns nil when the text is not a number at all; the caller keeps the old value.
+    static func parse(_ raw: String) -> Int? {
+        let trimmed = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "%", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed.allSatisfy(\.isNumber), let value = Int(trimmed) else {
+            return nil
+        }
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
 /// Pure, deterministic keep-awake decision: user intent with a battery-floor safety
 /// override and hysteresis latch. Extracted from the app delegate so it is unit-testable.
 enum BatteryFloorPolicy {
