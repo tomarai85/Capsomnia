@@ -284,13 +284,16 @@ struct CapsomniaMenuView: View {
     }
 
     private func commitCustomFloor() {
+        // Return-key commits arrive twice: onSubmit runs this, whose defer drops the
+        // focus, and the focus-loss onChange runs it again. The flag makes it once.
+        guard editingCustomFloor else { return }
         defer {
             editingCustomFloor = false
             customFieldFocused = false
         }
         // Not a number: fall back to whatever is actually in effect, silently.
         guard let percent = BatteryFloorInput.parse(customFloorText) else { return }
-        model.onSetFloorEnabled(true)
+        // onSetFloorPercent enables the floor itself (see makeMenuModel).
         model.onSetFloorPercent(percent)
     }
 

@@ -27,15 +27,14 @@ final class MenuPanel: NSPanel {
     /// so the field itself (the editor's client) is what the hit is tested against.
     override func sendEvent(_ event: NSEvent) {
         if event.type == .leftMouseDown,
-           let editor = firstResponder as? NSTextView, editor.isFieldEditor,
-           let content = contentView {
+           let editor = firstResponder as? NSTextView, editor.isFieldEditor {
+            // Bounds test instead of hitTest: convert(_:from: nil) is defined for any
+            // view regardless of how the borderless panel wraps its content, so this
+            // holds by contract rather than by the current view-hierarchy accident.
             let field = editor.delegate as? NSView ?? editor
-            let point = content.superview?.convert(event.locationInWindow, from: nil)
-                ?? event.locationInWindow
-            let hit = content.superview?.hitTest(point)
-            let insideField = hit === field || hit?.isDescendant(of: field) == true
-                || hit === editor || hit?.isDescendant(of: editor) == true
-            if !insideField {
+            let inField = field.bounds.contains(field.convert(event.locationInWindow, from: nil))
+            let inEditor = editor.bounds.contains(editor.convert(event.locationInWindow, from: nil))
+            if !inField && !inEditor {
                 makeFirstResponder(nil)
             }
         }
