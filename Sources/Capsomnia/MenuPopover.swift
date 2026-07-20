@@ -61,11 +61,23 @@ private let menuWidth: CGFloat = 300
 
 // MARK: - Root view
 
+/// Carries the laid-out height of the menu up to the hosting controller. Expanding a
+/// row grows the content while the popover is already on screen, and `NSPopover` only
+/// resizes when `preferredContentSize` changes — without this the extra rows are
+/// squeezed into the collapsed frame and every row shifts.
+struct MenuContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct CapsomniaMenuView: View {
     @ObservedObject var model: MenuModel
     /// Paints the brand wash behind the menu. Only wanted over legacy vibrancy — real
     /// Liquid Glass supplies its own depth, and the wash would flatten it.
     var tinted: Bool = true
+    var onContentHeightChange: (CGFloat) -> Void = { _ in }
     @State private var floorExpanded = false
     @State private var languageExpanded = false
 
@@ -99,6 +111,14 @@ struct CapsomniaMenuView: View {
                     startPoint: .top, endPoint: .bottom
                 )
             }
+        }
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: MenuContentHeightKey.self, value: proxy.size.height)
+            }
+        }
+        .onPreferenceChange(MenuContentHeightKey.self) { height in
+            onContentHeightChange(height)
         }
     }
 
@@ -459,7 +479,13 @@ final class StatusPopoverController: NSViewController {
         // The brand wash only exists to give legacy vibrancy some depth; over real glass
         // it would cancel out the transparency, so it is dropped on the Liquid Glass path.
         let host = NSHostingView(
-            rootView: CapsomniaMenuView(model: model, tinted: !GlassBackdrop.usesLiquidGlass)
+            rootView: CapsomniaMenuView(
+                model: model,
+                tinted: !GlassBackdrop.usesLiquidGlass,
+                onContentHeightChange: { [weak self] height in
+                    self?.applyContentHeight(height)
+                }
+            )
         )
         self.hostingView = host
 
@@ -491,6 +517,14 @@ final class StatusPopoverController: NSViewController {
         if let hostingView {
             preferredContentSize = hostingView.fittingSize
         }
+    }
+
+    /// Grow or shrink the popover as rows expand while it is already on screen. Sub-point
+    /// deltas are ignored so ordinary relayout noise cannot start a resize feedback loop.
+    private func applyContentHeight(_ height: CGFloat) {
+        guard height > 0 else { return }
+        guard abs(preferredContentSize.height - height) > 0.5 else { return }
+        preferredContentSize = CGSize(width: menuWidth, height: height)
     }
 
     /// The intro motion: the panel grows into place from its top edge (toward the
