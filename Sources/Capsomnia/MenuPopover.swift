@@ -38,6 +38,9 @@ final class MenuModel: ObservableObject {
     @Published var heldByFloor: Bool = false
     /// The user consented to run below the floor.
     @Published var overridingFloor: Bool = false
+    /// The helper or its verification read is currently failing. The menu bar shows the
+    /// error dot for this; the menu must not keep asserting a confirmed state beside it.
+    @Published var helperFailing: Bool = false
     @Published var batteryPercent: Int?
     @Published var floorRecoverPercent: Int = 20
     @Published var floorCriticalPercent: Int = BatteryFloorPolicy.criticalPercent
@@ -51,6 +54,9 @@ final class MenuModel: ObservableObject {
     var onSelectLanguage: (AppLanguage) -> Void = { _ in }
     var onOpenCapsomnia: () -> Void = {}
     var onQuit: () -> Void = {}
+
+    /// Keeping the Mac awake AND the last apply was confirmed against the system.
+    var confirmedAwake: Bool { keepingAwake && !helperFailing }
 
     init(strings: MenuStrings) {
         self.strings = strings
@@ -141,7 +147,7 @@ struct CapsomniaMenuView: View {
 
     private var header: some View {
         HStack(spacing: 11) {
-            LEDDot(on: model.keepingAwake, held: model.heldByFloor)
+            LEDDot(on: model.confirmedAwake, held: model.heldByFloor)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.strings.appName)
                     .font(.system(size: 15, weight: .semibold))
@@ -191,15 +197,19 @@ struct CapsomniaMenuView: View {
     /// floor stepped in are different facts. Held reads as an outlined pill — armed, not
     /// running — so it is distinguishable from plain OFF at a glance.
     private var statusPill: some View {
-        let title = model.heldByFloor ? model.strings.statusHeld : (model.keepingAwake ? "ON" : "OFF")
-        let accented = model.keepingAwake || model.heldByFloor
+        // `confirmedAwake`, not `keepingAwake`: the applied state is recorded optimistically
+        // before the confirming read, so while the helper is failing this would otherwise
+        // show a confident green ON next to the menu bar's red error dot.
+        let awake = model.confirmedAwake
+        let title = model.heldByFloor ? model.strings.statusHeld : (awake ? "ON" : "OFF")
+        let accented = awake || model.heldByFloor
         return Text(title)
             .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(model.keepingAwake ? Palette.led : (model.heldByFloor ? Palette.led.opacity(0.75) : Palette.textDim))
+            .foregroundStyle(awake ? Palette.led : (model.heldByFloor ? Palette.led.opacity(0.75) : Palette.textDim))
             .padding(.horizontal, 9)
             .padding(.vertical, 4)
             .background(
-                Capsule().fill(model.keepingAwake ? Palette.led.opacity(0.14) : Palette.surface.opacity(0.6))
+                Capsule().fill(awake ? Palette.led.opacity(0.14) : Palette.surface.opacity(0.6))
             )
             .overlay(
                 Capsule().stroke(accented ? Palette.led.opacity(0.35) : Palette.border, lineWidth: 1)
@@ -275,25 +285,39 @@ struct CapsomniaMenuView: View {
     }
 
     /// The floor row's right-hand side. At rest it shows the floor in effect; while the
-    /// floor is actually holding keep-awake off it becomes the way out, because that is
-    /// the only moment the override means anything. Swapping in place keeps the panel's
-    /// height fixed — a row that appears and disappears would shift everything under the
-    /// cursor while the menu is open.
+    /// floor is holding keep-awake off AND the override could actually take effect, it
+    /// becomes the way out. Below the critical charge the floor refuses the override, so
+    /// the control is not offered there — a button that silently does nothing is the
+    /// exact failure this feature exists to remove, and it would have appeared on every
+    /// hold at a floor of 10% or lower.
+    ///
+    /// The states swap in place inside a fixed height, so the panel does not resize under
+    /// the cursor when the floor engages while the menu is open.
     @ViewBuilder
     private var floorTrailing: some View {
-        if model.overridingFloor {
-            overrideChip(title: model.strings.batteryFloorOverrideActive, active: true) {
-                model.onSetFloorOverride(false)
+        Group {
+            if model.overridingFloor {
+                overrideChip(title: model.strings.batteryFloorOverrideActive, active: true) {
+                    model.onSetFloorOverride(false)
+                }
+            } else if model.heldByFloor, overrideIsOffered {
+                overrideChip(title: model.strings.batteryFloorOverride, active: false) {
+                    model.onSetFloorOverride(true)
+                }
+            } else {
+                Text(model.floorEnabled ? "\(model.floorPercent)%" : model.strings.modeOff)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(model.floorEnabled ? Palette.led : Palette.textDim)
             }
-        } else if model.heldByFloor {
-            overrideChip(title: model.strings.batteryFloorOverride, active: false) {
-                model.onSetFloorOverride(true)
-            }
-        } else {
-            Text(model.floorEnabled ? "\(model.floorPercent)%" : model.strings.modeOff)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(model.floorEnabled ? Palette.led : Palette.textDim)
         }
+        .frame(height: 22)
+    }
+
+    private var overrideIsOffered: Bool {
+        BatteryFloorPolicy.overrideCanApply(
+            percent: model.batteryPercent,
+            criticalPercent: model.floorCriticalPercent
+        )
     }
 
     private func overrideChip(title: String, active: Bool, action: @escaping () -> Void) -> some View {

@@ -157,6 +157,12 @@ enum BatteryReader {
                 .takeUnretainedValue() as? [String: Any] else {
                 continue
             }
+            // Only the built-in battery. The list can also carry a UPS, and taking the
+            // first source with a capacity would let the floor act on the UPS's charge
+            // instead of the Mac's.
+            guard description[kIOPSTypeKey as String] as? String == kIOPSInternalBatteryType else {
+                continue
+            }
             guard let current = description[kIOPSCurrentCapacityKey as String] as? Int,
                   let maximum = description[kIOPSMaxCapacityKey as String] as? Int,
                   maximum > 0 else {
@@ -259,6 +265,20 @@ enum BatteryFloorPolicy {
     /// The charge at which a latched floor lets go again.
     static func recoverPercent(floorPercent: Int, recoverMargin: Int) -> Int {
         floorPercent + recoverMargin
+    }
+
+    /// Whether taking the override would actually change anything right now. The floor
+    /// refuses it at or below the critical charge, so offering it there produces a
+    /// control that silently does nothing — which is the exact failure this feature was
+    /// built to remove. Note this is permanently false for any floor at or below the
+    /// critical charge (the held region is `percent <= floorPercent` by construction),
+    /// which is why a floor that low simply never shows the control.
+    static func overrideCanApply(
+        percent: Int?,
+        criticalPercent: Int = BatteryFloorPolicy.criticalPercent
+    ) -> Bool {
+        guard let percent else { return false }
+        return percent > criticalPercent
     }
 
     /// - Parameters:

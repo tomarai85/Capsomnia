@@ -57,6 +57,13 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
                 && Preferences.batteryFloorLatchedFloor == Preferences.batteryFloorPercent
         }
         set {
+            // Written from the 250ms poll, so it must not touch UserDefaults when
+            // nothing changed. (Measured cost of the unconditional write was
+            // negligible; it is still a write nobody asked for.)
+            guard Preferences.batteryFloorLatched != newValue
+                || Preferences.batteryFloorLatchedFloor != Preferences.batteryFloorPercent else {
+                return
+            }
             Preferences.batteryFloorLatched = newValue
             Preferences.batteryFloorLatchedFloor = Preferences.batteryFloorPercent
         }
@@ -243,6 +250,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         model.batteryPercent = keepAwakeStatus.percent ?? cachedBattery?.percent
         model.floorRecoverPercent = batteryFloorRecoverPercent
         model.floorCriticalPercent = BatteryFloorPolicy.criticalPercent
+        model.helperFailing = failedSleepState != nil
     }
 
     /// Kept as the single "menu changed" entry point so the existing setters can call it
@@ -515,7 +523,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         let capsLockFlag = CGEventSource.flagsState(.hidSystemState).contains(.maskAlphaShift)
         let battery = cachedBattery
         log(
-            "keep_awake_status \(describe(previous) ?? "none")->\(describe(keepAwakeStatus)!) "
+            "keep_awake_status \(previous.map(describe) ?? "none")->\(describe(keepAwakeStatus)) "
                 + "mode=\(Preferences.keepAwakeMode.rawValue) capslock_flag=\(capsLockFlag ? "on" : "off") "
                 + "battery=\(battery?.percent.map(String.init) ?? "unknown") "
                 + "power=\(battery.map { $0.onAC ? "ac" : "batt" } ?? "unknown") "
@@ -524,9 +532,8 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func describe(_ status: KeepAwakeStatus?) -> String? {
+    private func describe(_ status: KeepAwakeStatus) -> String {
         switch status {
-        case nil: return nil
         case .awake: return "awake"
         case .normal: return "normal"
         case .heldByFloor: return "held_by_floor"
@@ -592,12 +599,18 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         if resetVerification {
             nextSleepStateVerificationAt = nextSleepStateRetryAt
         }
+        // The menu bar goes to the error dot here, so the open menu must stop claiming
+        // the state was applied: `lastAppliedState` is set optimistically before the
+        // confirming read, and without this the popover showed a confident green ON
+        // beside a red menu-bar icon.
+        menuModel?.helperFailing = true
         updateStatusError()
     }
 
     private func markSleepStateConfirmed(_ capsLockOn: Bool, at now: Date, reason: String) {
         hasLoggedMissingSleepState = false
         failedSleepState = nil
+        menuModel?.helperFailing = false
         nextSleepStateRetryAt = .distantPast
         nextSleepStateVerificationAt = now.addingTimeInterval(sleepStateVerificationInterval)
         // Keep the popover's status pill / LED live even while it is open (e.g. the

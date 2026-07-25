@@ -162,6 +162,50 @@ final class BatteryFloorPolicyTests: XCTestCase {
         XCTAssertEqual(dropped.status, .heldByFloor(percent: 12))
     }
 
+    /// The control must only be offered where it can act. It used to be offered on every
+    /// hold, so at a floor of 10 (a preset pill) or lower it was a button that produced
+    /// literally nothing: the held region is `percent <= floorPercent` by construction, so
+    /// `percent > criticalPercent` could never be true there.
+    func testOverrideIsOnlyOfferedWhereItCanAct() {
+        XCTAssertTrue(BatteryFloorPolicy.overrideCanApply(percent: 11, criticalPercent: 10))
+        XCTAssertFalse(BatteryFloorPolicy.overrideCanApply(percent: 10, criticalPercent: 10))
+        XCTAssertFalse(BatteryFloorPolicy.overrideCanApply(percent: 3, criticalPercent: 10))
+        XCTAssertFalse(BatteryFloorPolicy.overrideCanApply(percent: nil, criticalPercent: 10))
+    }
+
+    /// Whenever it is offered, taking it must actually keep the Mac awake — and wherever
+    /// it is refused, it must not be offered. Swept over every floor the UI allows and
+    /// every charge that floor can hold at, so a future change to either constant that
+    /// breaks the pairing fails here instead of shipping a dead button.
+    func testOfferedAndEffectiveAgreeAcrossEveryFloorTheUIAllows() {
+        for floor in BatteryFloorInput.range {
+            for percent in 0...floor {
+                let offered = BatteryFloorPolicy.overrideCanApply(percent: percent)
+                let effective = decide(
+                    floor: floor, percent: percent, latched: true, overrideActive: true
+                ).keepAwake
+                XCTAssertEqual(
+                    offered, effective,
+                    "floor \(floor), battery \(percent)%: offered=\(offered) effective=\(effective)"
+                )
+            }
+        }
+    }
+
+    /// The exact case that shipped broken: the "10" preset pill. Held at 10%, the user
+    /// taps the override, and the floor refuses it — so the control must never have been
+    /// there. Both halves are asserted, because fixing only the UI or only the policy
+    /// would leave the other lying.
+    func testFloorOfTenNeverOffersAnOverrideItWouldRefuse() {
+        let held = decide(floor: 10, percent: 10, overrideActive: true)
+        XCTAssertFalse(held.keepAwake, "the floor refuses the override at the critical charge")
+        XCTAssertEqual(held.status, .heldByFloor(percent: 10))
+        XCTAssertFalse(
+            BatteryFloorPolicy.overrideCanApply(percent: 10),
+            "so the menu must not offer it"
+        )
+    }
+
     func testOverrideIsIrrelevantAboveTheFloor() {
         XCTAssertEqual(decide(percent: 60, overrideActive: true).status, .awake)
     }

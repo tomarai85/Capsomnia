@@ -61,7 +61,8 @@ final class MenuHeaderFitTests: XCTestCase {
                 strings.batteryFloorOverrideSubtitleFormat,
                 ["battery": widestFloor, "critical": BatteryFloorPolicy.criticalPercent]
             )
-            // Overriding shows the plain ON pill, not the held one.
+            // Overriding shows the plain ON pill. "OFF" is the wider of the two plain
+            // titles, so measuring against it is the conservative bound.
             let pill = width("OFF", size: 11, weight: .semibold) + pillHorizontalPadding
             let available = menuWidth - headerHorizontalPadding - headerStackGaps
                 - ledDotWidth - headerSpacerMinimum - pill
