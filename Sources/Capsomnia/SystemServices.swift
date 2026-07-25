@@ -190,15 +190,84 @@ enum BatteryFloorInput {
     }
 }
 
+/// Why the Mac is, or is not, being kept awake. A reasoned state rather than a Bool:
+/// "not awake because you chose Off" and "not awake because the battery is low" collapse
+/// to the same Bool, and that collapse is precisely what made the released state read as
+/// the app misbehaving — the mode still showed as selected with no reason given.
+enum KeepAwakeStatus: Equatable {
+    /// The mode wants the Mac awake and nothing is holding it off.
+    case awake
+    /// The mode does not want the Mac awake. Normal macOS sleep.
+    case normal
+    /// The mode wants the Mac awake; the battery floor released it.
+    case heldByFloor(percent: Int)
+    /// The floor would release, and the user explicitly consented to stay awake anyway.
+    case overriding(percent: Int)
+    /// Awake, but the power source could not be read, so the floor cannot be enforced.
+    case awakePowerUnknown
+
+    var isHeldByFloor: Bool {
+        if case .heldByFloor = self { return true }
+        return false
+    }
+
+    var isOverriding: Bool {
+        if case .overriding = self { return true }
+        return false
+    }
+
+    /// The charge the state was decided on, when the state carries one.
+    var percent: Int? {
+        switch self {
+        case .heldByFloor(let percent), .overriding(let percent):
+            return percent
+        case .awake, .normal, .awakePowerUnknown:
+            return nil
+        }
+    }
+}
+
 /// Pure, deterministic keep-awake decision: user intent with a battery-floor safety
 /// override and hysteresis latch. Extracted from the app delegate so it is unit-testable.
 enum BatteryFloorPolicy {
+    /// Below this charge the floor cannot be overridden. The override exists so the user
+    /// can consent to running low on purpose (lid closed, reachable over SSH); it is not
+    /// a way to drive the Mac to a hard shutdown. It is a mitigation, not a guarantee:
+    /// releasing keep-awake only restores normal sleep, it does not force the Mac to
+    /// sleep, so load and other assertions can still drain what is left.
+    static let criticalPercent = 10
+
+    struct Decision: Equatable {
+        /// Whether to keep the Mac awake right now.
+        let keepAwake: Bool
+        /// The hysteresis latch to carry into the next decision.
+        let latched: Bool
+        /// Why, for the UI and the log.
+        let status: KeepAwakeStatus
+
+        var heldByFloor: Bool {
+            if case .heldByFloor = status { return true }
+            return false
+        }
+
+        var overriding: Bool {
+            if case .overriding = status { return true }
+            return false
+        }
+    }
+
+    /// The charge at which a latched floor lets go again.
+    static func recoverPercent(floorPercent: Int, recoverMargin: Int) -> Int {
+        floorPercent + recoverMargin
+    }
+
     /// - Parameters:
     ///   - intent: whether the current mode wants the Mac awake.
     ///   - batteryReadable: false when the power source could not be read at all.
     ///   - percent: charge 0-100, or nil when unknown (but power source WAS readable).
     ///   - latched: whether keep-awake is currently released because of a prior low-battery hit.
-    /// - Returns: the keep-awake decision and the next latch state.
+    ///   - overrideActive: the user explicitly asked to stay awake below the floor.
+    /// - Returns: the keep-awake decision, the next latch state, and why.
     static func decide(
         intent: Bool,
         floorEnabled: Bool,
@@ -207,23 +276,54 @@ enum BatteryFloorPolicy {
         onAC: Bool,
         percent: Int?,
         batteryReadable: Bool,
-        latched: Bool
-    ) -> (keepAwake: Bool, latched: Bool) {
-        guard intent else { return (false, false) }
-        guard floorEnabled else { return (true, false) }
-        guard batteryReadable else { return (true, latched) }
-        if onAC { return (true, false) }
-        guard let percent else { return (true, latched) }
+        latched: Bool,
+        overrideActive: Bool = false,
+        criticalPercent: Int = BatteryFloorPolicy.criticalPercent
+    ) -> Decision {
+        // 1. The latch first, from the battery alone. It describes the battery's
+        //    trajectory, not what the user wants, so nothing about intent may touch it:
+        //    letting `intent == false` clear it meant a Caps Lock tap (or a mode change,
+        //    or a relaunch) silently reset the hysteresis and the same charge could then
+        //    read as either released or awake.
+        let nextLatched: Bool
+        if !floorEnabled {
+            nextLatched = false
+        } else if !batteryReadable {
+            nextLatched = latched
+        } else if onAC {
+            nextLatched = false
+        } else if let percent {
+            nextLatched = latched
+                ? percent < recoverPercent(floorPercent: floorPercent, recoverMargin: recoverMargin)
+                : percent <= floorPercent
+        } else {
+            nextLatched = latched
+        }
 
-        if latched {
-            if percent >= floorPercent + recoverMargin {
-                return (true, false)
-            }
-            return (false, true)
+        // 2. Then intent, which can only ever subtract.
+        guard intent else {
+            return Decision(keepAwake: false, latched: nextLatched, status: .normal)
         }
-        if percent <= floorPercent {
-            return (false, true)
+        guard floorEnabled else {
+            return Decision(keepAwake: true, latched: false, status: .awake)
         }
-        return (true, false)
+        guard batteryReadable else {
+            // Reachability is the priority: an unreadable power source must not put the
+            // Mac to sleep. The latch survives so a readable-again low battery still holds.
+            return Decision(keepAwake: true, latched: nextLatched, status: .awakePowerUnknown)
+        }
+        if onAC {
+            return Decision(keepAwake: true, latched: false, status: .awake)
+        }
+        guard let percent else {
+            return Decision(keepAwake: true, latched: nextLatched, status: .awakePowerUnknown)
+        }
+        guard nextLatched else {
+            return Decision(keepAwake: true, latched: false, status: .awake)
+        }
+        if overrideActive, percent > criticalPercent {
+            return Decision(keepAwake: true, latched: true, status: .overriding(percent: percent))
+        }
+        return Decision(keepAwake: false, latched: true, status: .heldByFloor(percent: percent))
     }
 }

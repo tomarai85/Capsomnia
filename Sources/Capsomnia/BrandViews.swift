@@ -102,4 +102,21 @@ enum DotImage {
         image.isTemplate = false
         return image
     }
+
+    /// A ring instead of a filled dot: armed, but something is holding it off. At
+    /// menu-bar size a shade of the same filled dot does not read as a different state —
+    /// the shape has to change. Drawn inset by half the line width so the stroke stays
+    /// inside the image bounds on a 1x display.
+    static func makeRing(color: NSColor) -> NSImage {
+        let size = NSSize(width: 14, height: 14)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        color.setStroke()
+        let path = NSBezierPath(ovalIn: NSRect(x: 2.75, y: 2.75, width: 8.5, height: 8.5))
+        path.lineWidth = 1.5
+        path.stroke()
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
+    }
 }

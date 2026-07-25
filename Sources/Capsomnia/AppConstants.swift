@@ -90,6 +90,17 @@ enum AppLanguage: String, CaseIterable {
     }
 }
 
+/// Fills `{token}` placeholders in a localized template. Templates beat `String(format:)`
+/// here because two of these strings carry two numbers, and the order they read in
+/// differs by language — positional `%d` would silently swap them.
+enum TextTemplate {
+    static func fill(_ template: String, _ values: [String: Int]) -> String {
+        values.reduce(template) { partial, pair in
+            partial.replacingOccurrences(of: "{\(pair.key)}", with: "\(pair.value)")
+        }
+    }
+}
+
 struct AppStrings {
     let showMenuBarIcon: String
     let showMenuBarIconDesc: String
@@ -120,6 +131,19 @@ struct AppStrings {
     let batteryFloorMenu: String
     let keepAwakeModeDesc: String
     let batteryFloorDesc: String
+    /// Mode-neutral wording for Off / Auto, where "Caps Lock" is not what is deciding.
+    let tooltipKeepAwakeOn: String
+    let tooltipKeepAwakeOff: String
+    /// The held state: the mode wants the Mac awake, the battery floor is releasing it.
+    let statusHeld: String
+    let batteryFloorHeldFormat: String
+    let tooltipHeldFormat: String
+    let batteryFloorOverride: String
+    let batteryFloorOverrideActive: String
+    /// Menu header: short, the chip beside the floor row already says "overriding".
+    let batteryFloorOverrideSubtitleFormat: String
+    /// Tooltip: no chip beside it, so it has to name what it is on its own.
+    let batteryFloorOverrideDetailFormat: String
 
     static func current() -> AppStrings {
         localized(for: Preferences.language)
@@ -157,7 +181,16 @@ struct AppStrings {
                 modeAuto: "Auto (always)",
                 batteryFloorMenu: "Battery floor",
                 keepAwakeModeDesc: "Off = normal sleep. Caps Lock = awake while Caps Lock is on. Auto = always keep awake (for closing the lid and working remotely).",
-                batteryFloorDesc: "On battery, allow sleep at or below this level so the battery is never fully drained."
+                batteryFloorDesc: "On battery, allow sleep at or below this level, so there is charge left in reserve instead of running the battery flat.",
+                tooltipKeepAwakeOn: "Keep awake ON: processes stay awake",
+                tooltipKeepAwakeOff: "Keep awake OFF: normal sleep",
+                statusHeld: "PAUSED",
+                batteryFloorHeldFormat: "Battery {battery}% · resumes {recover}%",
+                tooltipHeldFormat: "Paused by the battery floor: {battery}% is at or below {floor}%. Resumes at {recover}% or on AC.",
+                batteryFloorOverride: "Stay awake",
+                batteryFloorOverrideActive: "Overriding",
+                batteryFloorOverrideSubtitleFormat: "{battery}% · sleeps at {critical}%",
+                batteryFloorOverrideDetailFormat: "Floor overridden · {battery}%, sleeps at {critical}%"
             )
         case .korean:
             AppStrings(
@@ -189,7 +222,16 @@ struct AppStrings {
                 modeAuto: "자동 (항상)",
                 batteryFloorMenu: "배터리 하한",
                 keepAwakeModeDesc: "끄기 = 평소 잠자기. Caps Lock = Caps Lock이 켜져 있는 동안 깨어 있음. 자동 = 항상 깨어 있음(덮개를 닫고 원격 작업할 때).",
-                batteryFloorDesc: "배터리 사용 중에는 이 수준 이하에서 잠자기를 허용해 배터리가 완전히 방전되지 않게 합니다."
+                batteryFloorDesc: "배터리 사용 중에는 이 수준 이하에서 잠자기를 허용해 잔량을 남겨 둡니다.",
+                tooltipKeepAwakeOn: "잠자기 방지 켜짐: 작업이 계속 실행됩니다",
+                tooltipKeepAwakeOff: "잠자기 방지 꺼짐: 평소 잠자기",
+                statusHeld: "일시 중지",
+                batteryFloorHeldFormat: "{battery}% · {recover}%에서 재개",
+                tooltipHeldFormat: "배터리 하한으로 중지됨: {battery}%가 {floor}% 이하입니다. {recover}% 또는 전원 연결 시 재개합니다.",
+                batteryFloorOverride: "그래도 유지",
+                batteryFloorOverrideActive: "무시 중",
+                batteryFloorOverrideSubtitleFormat: "{battery}% · {critical}%에서 잠자기",
+                batteryFloorOverrideDetailFormat: "하한 무시 중 · {battery}%, {critical}%에서 잠자기"
             )
         case .japanese:
             AppStrings(
@@ -221,7 +263,16 @@ struct AppStrings {
                 modeAuto: "自動(常時)",
                 batteryFloorMenu: "バッテリー下限",
                 keepAwakeModeDesc: "オフ=通常のスリープ / Caps Lock=Caps Lock ON中だけ起きる / 自動=常時起こす(蓋を閉じてリモート作業する用)。",
-                batteryFloorDesc: "バッテリー駆動時、この残量以下でスリープを許可。電池が完全に尽きるのを防ぎます。"
+                batteryFloorDesc: "バッテリー駆動時、この残量以下でスリープを許可。使い切る前に余力を残します。",
+                tooltipKeepAwakeOn: "スリープ抑止中: 処理は動き続けます",
+                tooltipKeepAwakeOff: "スリープ抑止オフ: 通常のスリープ動作",
+                statusHeld: "一時停止",
+                batteryFloorHeldFormat: "残量{battery}% · {recover}%で再開",
+                tooltipHeldFormat: "バッテリー下限で一時停止中: {battery}%は{floor}%以下です。{recover}%か電源接続で再開します。",
+                batteryFloorOverride: "無視して起こす",
+                batteryFloorOverrideActive: "無視中",
+                batteryFloorOverrideSubtitleFormat: "残量{battery}% · {critical}%でスリープ",
+                batteryFloorOverrideDetailFormat: "下限を無視中 · {battery}%、{critical}%でスリープ"
             )
         case .simplifiedChinese:
             AppStrings(
@@ -253,7 +304,16 @@ struct AppStrings {
                 modeAuto: "自动（始终）",
                 batteryFloorMenu: "电量下限",
                 keepAwakeModeDesc: "关闭 = 正常睡眠。Caps Lock = 开启 Caps Lock 时保持唤醒。自动 = 始终保持唤醒（合盖远程工作时）。",
-                batteryFloorDesc: "使用电池时，在此电量或以下允许睡眠，避免电池彻底耗尽。"
+                batteryFloorDesc: "使用电池时，在此电量或以下允许睡眠，为电池保留余量。",
+                tooltipKeepAwakeOn: "防止睡眠已开启：任务将保持运行",
+                tooltipKeepAwakeOff: "防止睡眠已关闭：正常睡眠",
+                statusHeld: "已暂停",
+                batteryFloorHeldFormat: "电量 {battery}% · {recover}% 恢复",
+                tooltipHeldFormat: "已被电量下限暂停：{battery}% 低于或等于 {floor}%。达到 {recover}% 或接通电源后恢复。",
+                batteryFloorOverride: "保持唤醒",
+                batteryFloorOverrideActive: "忽略中",
+                batteryFloorOverrideSubtitleFormat: "电量 {battery}% · {critical}% 时睡眠",
+                batteryFloorOverrideDetailFormat: "正在忽略下限 · {battery}%，{critical}% 时睡眠"
             )
         }
     }
@@ -267,6 +327,8 @@ private enum PreferenceKey {
     static let keepAwakeMode = "KeepAwakeMode"
     static let batteryFloorEnabled = "BatteryFloorEnabled"
     static let batteryFloorPercent = "BatteryFloorPercent"
+    static let batteryFloorLatched = "BatteryFloorLatched"
+    static let batteryFloorLatchedFloor = "BatteryFloorLatchedFloor"
     static let didCompleteInitialSetup = "DidCompleteInitialSetup"
     static let forceWelcomeOnNextLaunch = "ForceWelcomeOnNextLaunch"
 }
@@ -283,6 +345,8 @@ enum Preferences {
             PreferenceKey.keepAwakeMode: KeepAwakeMode.capsLock.rawValue,
             PreferenceKey.batteryFloorEnabled: true,
             PreferenceKey.batteryFloorPercent: 15,
+            PreferenceKey.batteryFloorLatched: false,
+            PreferenceKey.batteryFloorLatchedFloor: 0,
             PreferenceKey.didCompleteInitialSetup: false,
             PreferenceKey.forceWelcomeOnNextLaunch: false
         ])
@@ -331,6 +395,23 @@ enum Preferences {
             return (value >= 5 && value <= 90) ? value : 15
         }
         set { defaults.set(newValue, forKey: PreferenceKey.batteryFloorPercent) }
+    }
+
+    /// The hysteresis latch, persisted. Kept out of memory-only state on purpose: a
+    /// relaunch used to clear it, so the same charge could yield "released" or "awake"
+    /// depending on whether the app had restarted. Attaching AC always clears it, so a
+    /// stale latch cannot outlive the discharge that set it.
+    static var batteryFloorLatched: Bool {
+        get { defaults.bool(forKey: PreferenceKey.batteryFloorLatched) }
+        set { defaults.set(newValue, forKey: PreferenceKey.batteryFloorLatched) }
+    }
+
+    /// The floor the stored latch was decided against. A latch taken under a different
+    /// threshold describes a policy that no longer exists, so it is discarded rather than
+    /// applied to the new one — the same reason editing the floor resets it in-session.
+    static var batteryFloorLatchedFloor: Int {
+        get { defaults.integer(forKey: PreferenceKey.batteryFloorLatchedFloor) }
+        set { defaults.set(newValue, forKey: PreferenceKey.batteryFloorLatchedFloor) }
     }
 
     static var didCompleteInitialSetup: Bool {

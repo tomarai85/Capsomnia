@@ -23,13 +23,51 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     private let onImage = DotImage.make(color: Brand.led)
     private let offImage = DotImage.make(color: NSColor(calibratedWhite: 0.58, alpha: 1.0))
     private let errorImage = DotImage.make(color: .systemRed)
+    /// Held by the battery floor: the mode is armed, the floor is holding it off. A ring
+    /// rather than another shade of dot — at menu-bar size a colour change alone does not
+    /// read as a different state.
+    private let heldImage = DotImage.makeRing(color: Brand.led)
     private let helperRetryInterval: TimeInterval = 5
     private let sleepStateVerificationInterval: TimeInterval = 10
     private var cachedBattery: BatteryReader.Snapshot?
     private var cachedBatteryReadAt = Date.distantPast
-    private var batteryFloorLatched = false
     private let batteryCacheInterval: TimeInterval = 5
     private let batteryFloorRecoverMargin = 5
+    /// Explicit consent to keep running below the floor. Deliberately NOT persisted:
+    /// after a relaunch — including one that followed a crash — the app must come back
+    /// on the safe side rather than silently still overriding a safety limit.
+    private var batteryFloorOverride = false
+    /// The reasoned keep-awake state, and the copy of it the UI has already been told
+    /// about. The status can change without the applied on/off state changing (the floor
+    /// engaging, an override being taken), and those changes have to reach the menu bar.
+    private var keepAwakeStatus: KeepAwakeStatus = .normal
+    private var publishedStatus: KeepAwakeStatus?
+    /// Beyond this age a cached power read is treated as no read at all. Falling back to
+    /// an arbitrarily old snapshot would let the floor act on a charge from hours ago.
+    private let batteryStaleInterval: TimeInterval = 60
+
+    /// Persisted so a relaunch cannot silently un-latch: the same charge used to mean
+    /// "released" or "awake" depending on whether the app had restarted since. Safe to
+    /// persist because the un-latch conditions (AC, or charge back above the recover
+    /// threshold) are re-evaluated from a fresh read on every poll, so a latch cannot
+    /// outlive the discharge that set it.
+    private var batteryFloorLatched: Bool {
+        get {
+            Preferences.batteryFloorLatched
+                && Preferences.batteryFloorLatchedFloor == Preferences.batteryFloorPercent
+        }
+        set {
+            Preferences.batteryFloorLatched = newValue
+            Preferences.batteryFloorLatchedFloor = Preferences.batteryFloorPercent
+        }
+    }
+
+    private var batteryFloorRecoverPercent: Int {
+        BatteryFloorPolicy.recoverPercent(
+            floorPercent: Preferences.batteryFloorPercent,
+            recoverMargin: batteryFloorRecoverMargin
+        )
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if terminateIfNewerInteractiveDuplicate() {
@@ -162,6 +200,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             self?.setBatteryFloorEnabled(true)
             self?.setBatteryFloorPercent(percent)
         }
+        model.onSetFloorOverride = { [weak self] enabled in self?.setBatteryFloorOverride(enabled) }
         model.onSetShowMenuBarIcon = { [weak self] enabled in self?.setShowMenuBarIcon(enabled) }
         model.onSelectLanguage = { [weak self] language in self?.setLanguage(language) }
         model.onOpenCapsomnia = { [weak self] in self?.openCapsomnia() }
@@ -182,7 +221,12 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             showMenuBarIcon: s.showMenuBarIcon,
             language: s.language,
             openCapsomnia: s.openCapsomnia,
-            quit: s.quit
+            quit: s.quit,
+            statusHeld: s.statusHeld,
+            batteryFloorHeldFormat: s.batteryFloorHeldFormat,
+            batteryFloorOverride: s.batteryFloorOverride,
+            batteryFloorOverrideActive: s.batteryFloorOverrideActive,
+            batteryFloorOverrideSubtitleFormat: s.batteryFloorOverrideSubtitleFormat
         )
     }
 
@@ -194,6 +238,11 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         model.showMenuBarIcon = Preferences.showMenuBarIcon
         model.language = Preferences.language
         model.keepingAwake = currentCapsLockState
+        model.heldByFloor = keepAwakeStatus.isHeldByFloor
+        model.overridingFloor = keepAwakeStatus.isOverriding
+        model.batteryPercent = keepAwakeStatus.percent ?? cachedBattery?.percent
+        model.floorRecoverPercent = batteryFloorRecoverPercent
+        model.floorCriticalPercent = BatteryFloorPolicy.criticalPercent
     }
 
     /// Kept as the single "menu changed" entry point so the existing setters can call it
@@ -213,19 +262,34 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Note what is NOT here: the hysteresis latch is not cleared. Choosing a mode says
+    /// what you want, it says nothing about the battery — clearing the latch here meant
+    /// that between the floor and the recover threshold the same charge produced
+    /// "released" or "awake" depending on whether the user had happened to touch the
+    /// mode, which is the undocumented escape hatch that made this feel unstable.
+    /// Turning the mode fully off does end an override: that is consent withdrawn.
     private func setKeepAwakeMode(_ mode: KeepAwakeMode) {
         guard Preferences.keepAwakeMode != mode else { return }
         Preferences.keepAwakeMode = mode
-        batteryFloorLatched = false
+        if mode == .off, batteryFloorOverride {
+            batteryFloorOverride = false
+            log("battery_floor override_expired reason=mode_off")
+        }
         rebuildStatusMenu()
         applyCurrentCapsLockState(reason: "mode_change")
         refreshStatus(capsLockOn: currentCapsLockState)
         log("preference keep_awake_mode=\(mode.rawValue)")
     }
 
+    /// The floor setters DO reset the latch and any override, and the difference from
+    /// the mode setter is deliberate: editing the floor redefines the threshold the
+    /// hysteresis is measured against, so the old latch describes a policy that no longer
+    /// exists. The equality guard matters — the menu's floor pills call this before
+    /// setting a percent, so without it every pill tap reset the safety state.
     private func setBatteryFloorEnabled(_ enabled: Bool) {
+        guard Preferences.batteryFloorEnabled != enabled else { return }
         Preferences.batteryFloorEnabled = enabled
-        batteryFloorLatched = false
+        resetBatteryFloorState()
         rebuildStatusMenu()
         applyCurrentCapsLockState(reason: "battery_floor_change")
         log("preference battery_floor_enabled=\(enabled ? "on" : "off")")
@@ -234,10 +298,15 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     private func setBatteryFloorPercent(_ percent: Int) {
         guard Preferences.batteryFloorPercent != percent else { return }
         Preferences.batteryFloorPercent = percent
-        batteryFloorLatched = false
+        resetBatteryFloorState()
         rebuildStatusMenu()
         applyCurrentCapsLockState(reason: "battery_floor_percent")
         log("preference battery_floor_percent=\(percent)")
+    }
+
+    private func resetBatteryFloorState() {
+        batteryFloorLatched = false
+        batteryFloorOverride = false
     }
 
     @objc private func openCapsomnia() {
@@ -341,11 +410,14 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     }
 
     private func applyCurrentCapsLockState(reason: String) {
-        apply(capsLockOn: desiredKeepAwake(), reason: reason)
+        apply(capsLockOn: desiredKeepAwake(reason: reason), reason: reason)
+        publishStatusIfChanged()
     }
 
     /// Cached power-source read (refreshed every `batteryCacheInterval`) so the 250ms
-    /// poll never spins IOKit needlessly.
+    /// poll never spins IOKit needlessly. A failed re-read falls back to the cached
+    /// snapshot only while it is still recent: past that the answer is "unknown", which
+    /// keeps the Mac awake rather than letting the floor act on a stale charge.
     private func batterySnapshot() -> BatteryReader.Snapshot? {
         let now = Date()
         if let cachedBattery, now.timeIntervalSince(cachedBatteryReadAt) < batteryCacheInterval {
@@ -356,15 +428,20 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             cachedBatteryReadAt = now
             return fresh
         }
+        guard now.timeIntervalSince(cachedBatteryReadAt) < batteryStaleInterval else {
+            cachedBattery = nil
+            return nil
+        }
         return cachedBattery
     }
 
     /// Single source of truth for whether to keep the Mac awake: user intent (mode)
-    /// with a hysteresis-latched battery-floor safety override. On battery below the
-    /// floor it releases so the Mac can sleep and the battery is never fully drained
-    /// (which would also drop remote access). Unreadable power state stays awake —
-    /// reachability is the priority.
-    private func desiredKeepAwake() -> Bool {
+    /// with a hysteresis-latched battery-floor safety, and the reason recorded alongside
+    /// so the menu bar can say which of the two is talking. On battery below the floor it
+    /// releases so the Mac can sleep with charge still in reserve (a flat battery would
+    /// also drop remote access). Unreadable power state stays awake — reachability is
+    /// the priority.
+    private func desiredKeepAwake(reason: String) -> Bool {
         let intent: Bool
         switch Preferences.keepAwakeMode {
         case .off:
@@ -376,6 +453,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         }
 
         let battery = batterySnapshot()
+        expireBatteryFloorOverride(battery: battery)
         let result = BatteryFloorPolicy.decide(
             intent: intent,
             floorEnabled: Preferences.batteryFloorEnabled,
@@ -384,10 +462,77 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             onAC: battery?.onAC ?? false,
             percent: battery?.percent,
             batteryReadable: battery != nil,
-            latched: batteryFloorLatched
+            latched: batteryFloorLatched,
+            overrideActive: batteryFloorOverride
         )
         batteryFloorLatched = result.latched
+        keepAwakeStatus = result.status
         return result.keepAwake
+    }
+
+    /// The override is consent to run below the floor *now*. Reaching wall power ends
+    /// the situation it was given for, and leaving it armed would silently skip the
+    /// floor on the next discharge; at the critical charge it is refused anyway, so it
+    /// is dropped rather than left to look active.
+    private func expireBatteryFloorOverride(battery: BatteryReader.Snapshot?) {
+        guard batteryFloorOverride else { return }
+        if battery?.onAC == true {
+            batteryFloorOverride = false
+            log("battery_floor override_expired reason=ac")
+            return
+        }
+        if let percent = battery?.percent, percent <= BatteryFloorPolicy.criticalPercent {
+            batteryFloorOverride = false
+            log("battery_floor override_expired reason=critical percent=\(percent)")
+        }
+    }
+
+    private func setBatteryFloorOverride(_ enabled: Bool) {
+        guard batteryFloorOverride != enabled else { return }
+        batteryFloorOverride = enabled
+        log("battery_floor override=\(enabled ? "on" : "off")")
+        // Re-applies and, through publishStatusIfChanged, repaints the menu and the icon.
+        applyCurrentCapsLockState(reason: "battery_floor_override")
+    }
+
+    /// Pushes a status change to the menu bar and the open menu, once per change. The
+    /// applied on/off state can stay put while the reason for it changes (the floor
+    /// engaging, an override being taken), and that used to reach nothing at all.
+    private func publishStatusIfChanged() {
+        guard keepAwakeStatus != publishedStatus else { return }
+        let previous = publishedStatus
+        publishedStatus = keepAwakeStatus
+        logStatusChange(from: previous)
+        rebuildStatusMenu()
+        refreshStatus(capsLockOn: currentCapsLockState)
+    }
+
+    /// One line per change, never per poll. Diagnosing a released keep-awake used to mean
+    /// correlating `pmset -g log` by hand, because the app logged `capslock=off` with no
+    /// reason attached. The raw inputs go on the same line so a future "it flapped" can
+    /// be settled from this log alone.
+    private func logStatusChange(from previous: KeepAwakeStatus?) {
+        let capsLockFlag = CGEventSource.flagsState(.hidSystemState).contains(.maskAlphaShift)
+        let battery = cachedBattery
+        log(
+            "keep_awake_status \(describe(previous) ?? "none")->\(describe(keepAwakeStatus)!) "
+                + "mode=\(Preferences.keepAwakeMode.rawValue) capslock_flag=\(capsLockFlag ? "on" : "off") "
+                + "battery=\(battery?.percent.map(String.init) ?? "unknown") "
+                + "power=\(battery.map { $0.onAC ? "ac" : "batt" } ?? "unknown") "
+                + "floor=\(Preferences.batteryFloorEnabled ? "\(Preferences.batteryFloorPercent)" : "off") "
+                + "recover=\(batteryFloorRecoverPercent) latched=\(batteryFloorLatched ? "yes" : "no")"
+        )
+    }
+
+    private func describe(_ status: KeepAwakeStatus?) -> String? {
+        switch status {
+        case nil: return nil
+        case .awake: return "awake"
+        case .normal: return "normal"
+        case .heldByFloor: return "held_by_floor"
+        case .overriding: return "overriding"
+        case .awakePowerUnknown: return "awake_power_unknown"
+        }
     }
 
     private func apply(capsLockOn: Bool, reason: String) {
@@ -524,8 +669,35 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     private func updateStatus(capsLockOn: Bool) {
         guard let button = statusItem?.button else { return }
         let strings = AppStrings.current()
+        if case .heldByFloor(let percent) = keepAwakeStatus {
+            button.image = heldImage
+            button.toolTip = TextTemplate.fill(strings.tooltipHeldFormat, [
+                "battery": percent,
+                "floor": Preferences.batteryFloorPercent,
+                "recover": batteryFloorRecoverPercent
+            ])
+            return
+        }
         button.image = capsLockOn ? onImage : offImage
-        button.toolTip = capsLockOn ? strings.tooltipOn : strings.tooltipOff
+        button.toolTip = tooltipText(capsLockOn: capsLockOn, strings: strings)
+    }
+
+    /// Caps Lock wording only in the mode where Caps Lock is what decides. In Auto the
+    /// tooltip used to read "Caps Lock OFF: normal sleep" while Auto was the selected
+    /// mode — the app narrating a control the user was not using.
+    private func tooltipText(capsLockOn: Bool, strings: AppStrings) -> String {
+        if case .overriding(let percent) = keepAwakeStatus {
+            return TextTemplate.fill(strings.batteryFloorOverrideDetailFormat, [
+                "battery": percent,
+                "critical": BatteryFloorPolicy.criticalPercent
+            ])
+        }
+        switch Preferences.keepAwakeMode {
+        case .capsLock:
+            return capsLockOn ? strings.tooltipOn : strings.tooltipOff
+        case .off, .auto:
+            return capsLockOn ? strings.tooltipKeepAwakeOn : strings.tooltipKeepAwakeOff
+        }
     }
 
     private func refreshStatus(capsLockOn: Bool) {

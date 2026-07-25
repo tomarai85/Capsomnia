@@ -16,6 +16,11 @@ struct MenuStrings {
     var language: String
     var openCapsomnia: String
     var quit: String
+    var statusHeld: String
+    var batteryFloorHeldFormat: String
+    var batteryFloorOverride: String
+    var batteryFloorOverrideActive: String
+    var batteryFloorOverrideSubtitleFormat: String
 }
 
 /// Observable state the glass menu binds to. The app delegate owns this, refreshes it
@@ -29,11 +34,19 @@ final class MenuModel: ObservableObject {
     @Published var showMenuBarIcon: Bool = true
     @Published var language: AppLanguage = .english
     @Published var keepingAwake: Bool = false
+    /// The battery floor is holding keep-awake off even though the mode wants it on.
+    @Published var heldByFloor: Bool = false
+    /// The user consented to run below the floor.
+    @Published var overridingFloor: Bool = false
+    @Published var batteryPercent: Int?
+    @Published var floorRecoverPercent: Int = 20
+    @Published var floorCriticalPercent: Int = BatteryFloorPolicy.criticalPercent
     @Published var strings: MenuStrings
 
     var onSelectMode: (KeepAwakeMode) -> Void = { _ in }
     var onSetFloorEnabled: (Bool) -> Void = { _ in }
     var onSetFloorPercent: (Int) -> Void = { _ in }
+    var onSetFloorOverride: (Bool) -> Void = { _ in }
     var onSetShowMenuBarIcon: (Bool) -> Void = { _ in }
     var onSelectLanguage: (AppLanguage) -> Void = { _ in }
     var onOpenCapsomnia: () -> Void = {}
@@ -128,14 +141,14 @@ struct CapsomniaMenuView: View {
 
     private var header: some View {
         HStack(spacing: 11) {
-            LEDDot(on: model.keepingAwake)
+            LEDDot(on: model.keepingAwake, held: model.heldByFloor)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.strings.appName)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Palette.text)
                 Text(subtitle)
                     .font(.system(size: 11))
-                    .foregroundStyle(Palette.textDim)
+                    .foregroundStyle(model.heldByFloor ? Palette.text.opacity(0.85) : Palette.textDim)
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
@@ -146,8 +159,24 @@ struct CapsomniaMenuView: View {
         .padding(.bottom, 12)
     }
 
+    /// Carries the reason, not just the setting. When the floor is holding keep-awake
+    /// off, the mode alone is a lie by omission: the row still reads "Auto" while
+    /// nothing is being kept awake, which is how this looked like a malfunction.
+    /// The line is single-height in every state so the panel never changes size.
     private var subtitle: String {
-        "\(model.strings.keepAwakeHeading) · \(currentModeLabel)"
+        if model.heldByFloor {
+            return TextTemplate.fill(model.strings.batteryFloorHeldFormat, [
+                "battery": model.batteryPercent ?? 0,
+                "recover": model.floorRecoverPercent
+            ])
+        }
+        if model.overridingFloor {
+            return TextTemplate.fill(model.strings.batteryFloorOverrideSubtitleFormat, [
+                "battery": model.batteryPercent ?? 0,
+                "critical": model.floorCriticalPercent
+            ])
+        }
+        return "\(model.strings.keepAwakeHeading) · \(currentModeLabel)"
     }
 
     private var currentModeLabel: String {
@@ -158,17 +187,22 @@ struct CapsomniaMenuView: View {
         }
     }
 
+    /// Three states, not two: OFF because you asked for it and OFF because the battery
+    /// floor stepped in are different facts. Held reads as an outlined pill — armed, not
+    /// running — so it is distinguishable from plain OFF at a glance.
     private var statusPill: some View {
-        Text(model.keepingAwake ? "ON" : "OFF")
+        let title = model.heldByFloor ? model.strings.statusHeld : (model.keepingAwake ? "ON" : "OFF")
+        let accented = model.keepingAwake || model.heldByFloor
+        return Text(title)
             .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(model.keepingAwake ? Palette.led : Palette.textDim)
+            .foregroundStyle(model.keepingAwake ? Palette.led : (model.heldByFloor ? Palette.led.opacity(0.75) : Palette.textDim))
             .padding(.horizontal, 9)
             .padding(.vertical, 4)
             .background(
                 Capsule().fill(model.keepingAwake ? Palette.led.opacity(0.14) : Palette.surface.opacity(0.6))
             )
             .overlay(
-                Capsule().stroke(model.keepingAwake ? Palette.led.opacity(0.35) : Palette.border, lineWidth: 1)
+                Capsule().stroke(accented ? Palette.led.opacity(0.35) : Palette.border, lineWidth: 1)
             )
     }
 
@@ -217,9 +251,7 @@ struct CapsomniaMenuView: View {
                     .font(.system(size: 13))
                     .foregroundStyle(Palette.text)
                 Spacer(minLength: 4)
-                Text(model.floorEnabled ? "\(model.floorPercent)%" : model.strings.modeOff)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(model.floorEnabled ? Palette.led : Palette.textDim)
+                floorTrailing
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -239,6 +271,44 @@ struct CapsomniaMenuView: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 6)
+        }
+    }
+
+    /// The floor row's right-hand side. At rest it shows the floor in effect; while the
+    /// floor is actually holding keep-awake off it becomes the way out, because that is
+    /// the only moment the override means anything. Swapping in place keeps the panel's
+    /// height fixed — a row that appears and disappears would shift everything under the
+    /// cursor while the menu is open.
+    @ViewBuilder
+    private var floorTrailing: some View {
+        if model.overridingFloor {
+            overrideChip(title: model.strings.batteryFloorOverrideActive, active: true) {
+                model.onSetFloorOverride(false)
+            }
+        } else if model.heldByFloor {
+            overrideChip(title: model.strings.batteryFloorOverride, active: false) {
+                model.onSetFloorOverride(true)
+            }
+        } else {
+            Text(model.floorEnabled ? "\(model.floorPercent)%" : model.strings.modeOff)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(model.floorEnabled ? Palette.led : Palette.textDim)
+        }
+    }
+
+    private func overrideChip(title: String, active: Bool, action: @escaping () -> Void) -> some View {
+        HoverRow(action: action) { hovering in
+            Text(title)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(active ? Palette.bg : Palette.text)
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule().fill(active ? Palette.led : (hovering ? Palette.surface : Palette.surface.opacity(0.6)))
+                )
+                .overlay(Capsule().stroke(active ? .clear : Palette.led.opacity(0.45), lineWidth: 1))
         }
     }
 
@@ -431,11 +501,21 @@ struct CapsomniaMenuView: View {
 
 private struct LEDDot: View {
     let on: Bool
+    /// Armed but held off. Hollow rather than another shade — the same distinction the
+    /// menu-bar icon makes, so the two never disagree about what state the app is in.
+    var held: Bool = false
+
     var body: some View {
         Circle()
             .fill(on ? Palette.led : Color(nsColor: Brand.offDot))
             .frame(width: 12, height: 12)
-            .overlay(Circle().stroke(on ? Palette.ledBright.opacity(0.9) : Color(nsColor: Brand.offDotBorder), lineWidth: 1))
+            .overlay(
+                Circle().stroke(
+                    on ? Palette.ledBright.opacity(0.9)
+                       : (held ? Palette.led.opacity(0.75) : Color(nsColor: Brand.offDotBorder)),
+                    lineWidth: held ? 1.5 : 1
+                )
+            )
             .shadow(color: on ? Palette.led.opacity(0.8) : .clear, radius: 5)
     }
 }
