@@ -41,6 +41,7 @@ final class LocalizationTests: XCTestCase {
             XCTAssertFalse(strings.batteryFloorOverrideActive.isEmpty, "\(language)")
             XCTAssertFalse(strings.tooltipKeepAwakeOn.isEmpty, "\(language)")
             XCTAssertFalse(strings.tooltipKeepAwakeOff.isEmpty, "\(language)")
+            XCTAssertFalse(strings.tooltipPowerUnknown.isEmpty, "\(language)")
 
             // Every placeholder must be filled, in every language — a template that kept
             // a "{battery}" would ship the token to the menu bar verbatim.

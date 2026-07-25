@@ -12,7 +12,24 @@ struct LaunchAgentError: LocalizedError {
 }
 
 enum CommandRunner {
-    static func run(_ executablePath: String, _ arguments: [String]) -> (status: Int32, stdout: String, stderr: String) {
+    /// Every command this app runs (`sudo`, `pmset`, `launchctl`) answers in
+    /// milliseconds. The bound exists because the calls are synchronous and made from
+    /// the main actor: without it, one hung child freezes the whole app — and since the
+    /// SIGINT/SIGTERM handlers used to run on that same actor, the app then could not be
+    /// killed by anything short of SIGKILL, which skips the restore that puts system
+    /// sleep back. A late answer is worthless here anyway; the poll will try again.
+    static let defaultTimeout: TimeInterval = 5
+    /// How long a timed-out child gets to die politely before it is killed outright.
+    private static let terminationGrace: TimeInterval = 1
+    /// Distinct from any exit code a real command produces, so callers can tell
+    /// "it failed" from "it never answered" in the log.
+    static let timedOutStatus: Int32 = -2
+
+    static func run(
+        _ executablePath: String,
+        _ arguments: [String],
+        timeout: TimeInterval = defaultTimeout
+    ) -> (status: Int32, stdout: String, stderr: String) {
         let process = Process()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -22,23 +39,52 @@ enum CommandRunner {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        // Set before run(): a short-lived child can exit before the handler is attached.
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+
+        // Drain both pipes concurrently with the wait. Reading them after the process
+        // has been waited on deadlocks the moment a child fills a 64KB pipe buffer —
+        // survivable so far only because pmset says so little.
+        var stdoutData = Data()
+        var stderrData = Data()
+        let readers = DispatchGroup()
+        let ioQueue = DispatchQueue(label: "\(appLabel).command-io", attributes: .concurrent)
+
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             return (-1, "", "\(error)")
         }
 
-        return (
-            process.terminationStatus,
-            read(stdoutPipe.fileHandleForReading),
-            read(stderrPipe.fileHandleForReading)
-        )
+        ioQueue.async(group: readers) {
+            stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        }
+        ioQueue.async(group: readers) {
+            stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        }
+
+        var timedOut = false
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
+            timedOut = true
+            process.terminate()
+            if exited.wait(timeout: .now() + terminationGrace) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                _ = exited.wait(timeout: .now() + terminationGrace)
+            }
+        }
+
+        // The readers finish once the child's write ends close, which killing it forces.
+        _ = readers.wait(timeout: .now() + terminationGrace)
+
+        guard !timedOut else {
+            return (timedOutStatus, "", "timed out after \(timeout)s")
+        }
+        return (process.terminationStatus, text(stdoutData), text(stderrData))
     }
 
-    private static func read(_ handle: FileHandle) -> String {
-        let data = handle.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?
+    private static func text(_ data: Data) -> String {
+        String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 }

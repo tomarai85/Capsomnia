@@ -6,14 +6,20 @@ import Foundation
 final class Capsomnia: NSObject, NSApplicationDelegate {
     private var lastAppliedState: Bool?
     private var failedSleepState: Bool?
-    private var nextSleepStateRetryAt = Date.distantPast
-    private var nextSleepStateVerificationAt = Date.distantPast
-    private var nextDisplaySleepRetryAt = Date.distantPast
+    // Monotonic, not wall-clock. `Date` arithmetic silently stretched every one of
+    // these windows by however far the clock jumped backwards — an NTP correction
+    // shortly after boot is the ordinary way that happens — and stale state was
+    // trusted for the length of the jump. nil means "no deadline pending".
+    private var nextSleepStateRetryAt: ContinuousClock.Instant?
+    private var nextSleepStateVerificationAt: ContinuousClock.Instant?
+    private var nextDisplaySleepRetryAt: ContinuousClock.Instant?
     private var didRequestDisplaySleepForClosedLid = false
     private var hasLoggedMissingClamshellState = false
     private var hasLoggedMissingDisplayState = false
     private var hasLoggedMissingSleepState = false
     private var shouldRestoreSleepOnTerminate = true
+    /// Held open for the life of the process; closing it would release the lock.
+    private var instanceLockDescriptor: Int32 = -1
     private var pollingTimer: Timer?
     private var signalSources: [DispatchSourceSignal] = []
     private var statusItem: NSStatusItem?
@@ -30,7 +36,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     private let helperRetryInterval: TimeInterval = 5
     private let sleepStateVerificationInterval: TimeInterval = 10
     private var cachedBattery: BatteryReader.Snapshot?
-    private var cachedBatteryReadAt = Date.distantPast
+    private var cachedBatteryReadAt: ContinuousClock.Instant?
     private let batteryCacheInterval: TimeInterval = 5
     private let batteryFloorRecoverMargin = 5
     /// Explicit consent to keep running below the floor. Deliberately NOT persisted:
@@ -116,19 +122,14 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         log("terminate restore_off helper_status=\(result.status) stdout=\(result.stdout) stderr=\(result.stderr)")
     }
 
+    /// An advisory file lock decides who runs, not a PID comparison against
+    /// `runningApplications`. That query is a snapshot: a login-item launch racing a
+    /// manual open could have both instances see an empty list, both survive, and both
+    /// drive the same root helper from their own poll loops. The lock is held by the fd
+    /// for the life of the process, so it is released however the process dies —
+    /// including SIGKILL.
     private func terminateIfNewerInteractiveDuplicate() -> Bool {
-        guard ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] != appLabel else {
-            return false
-        }
-
-        let currentPID = getpid()
-        let olderInstances = NSRunningApplication
-            .runningApplications(withBundleIdentifier: appLabel)
-            .filter { !$0.isTerminated && $0.processIdentifier > 0 && $0.processIdentifier < currentPID }
-
-        guard let existing = olderInstances.min(by: { $0.processIdentifier < $1.processIdentifier }) else {
-            return false
-        }
+        guard !acquireSingleInstanceLock() else { return false }
 
         shouldRestoreSleepOnTerminate = false
         DistributedNotificationCenter.default().post(
@@ -136,9 +137,33 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             object: appLabel,
             userInfo: nil
         )
-        existing.activate(options: [])
-        log("duplicate_instance existing_pid=\(existing.processIdentifier) terminate_without_restore")
+        // Best-effort courtesy only: bringing the incumbent forward. Whether we exit was
+        // already decided by the lock.
+        NSRunningApplication
+            .runningApplications(withBundleIdentifier: appLabel)
+            .first { !$0.isTerminated && $0.processIdentifier != getpid() }?
+            .activate(options: [])
+        log("duplicate_instance lock_held_elsewhere terminate_without_restore")
         NSApp.terminate(nil)
+        return true
+    }
+
+    /// True when this process now owns the lock. A lock file that cannot be created at
+    /// all returns true: failing to start is worse than the duplicate it would prevent.
+    private func acquireSingleInstanceLock() -> Bool {
+        let path = logDirectoryURL.appendingPathComponent("instance.lock").path
+        try? FileManager.default.createDirectory(at: logDirectoryURL, withIntermediateDirectories: true)
+
+        let descriptor = Darwin.open(path, O_CREAT | O_RDWR, 0o644)
+        guard descriptor >= 0 else {
+            log("instance_lock unavailable path=\(path) errno=\(errno)")
+            return true
+        }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            close(descriptor)
+            return false
+        }
+        instanceLockDescriptor = descriptor
         return true
     }
 
@@ -427,8 +452,9 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     /// snapshot only while it is still recent: past that the answer is "unknown", which
     /// keeps the Mac awake rather than letting the floor act on a stale charge.
     private func batterySnapshot() -> BatteryReader.Snapshot? {
-        let now = Date()
-        if let cachedBattery, now.timeIntervalSince(cachedBatteryReadAt) < batteryCacheInterval {
+        let now = ContinuousClock.now
+        if let cachedBattery, let readAt = cachedBatteryReadAt,
+           readAt.duration(to: now) < .seconds(batteryCacheInterval) {
             return cachedBattery
         }
         if let fresh = BatteryReader.read() {
@@ -436,7 +462,8 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             cachedBatteryReadAt = now
             return fresh
         }
-        guard now.timeIntervalSince(cachedBatteryReadAt) < batteryStaleInterval else {
+        guard let readAt = cachedBatteryReadAt,
+              readAt.duration(to: now) < .seconds(batteryStaleInterval) else {
             cachedBattery = nil
             return nil
         }
@@ -543,13 +570,13 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     }
 
     private func apply(capsLockOn: Bool, reason: String) {
-        let now = Date()
-        if failedSleepState == capsLockOn, now < nextSleepStateRetryAt {
+        let now = ContinuousClock.now
+        if failedSleepState == capsLockOn, let retryAt = nextSleepStateRetryAt, now < retryAt {
             return
         }
 
         if lastAppliedState == capsLockOn {
-            if failedSleepState == nil, now < nextSleepStateVerificationAt {
+            if failedSleepState == nil, let verifyAt = nextSleepStateVerificationAt, now < verifyAt {
                 evaluateDisplaySleepForClosedLid(capsLockOn: capsLockOn, reason: reason)
                 return
             }
@@ -593,9 +620,13 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         markSleepStateConfirmed(capsLockOn, at: now, reason: reason)
     }
 
-    private func markSleepStateFailed(_ capsLockOn: Bool, at now: Date, resetVerification: Bool = true) {
+    private func markSleepStateFailed(
+        _ capsLockOn: Bool,
+        at now: ContinuousClock.Instant,
+        resetVerification: Bool = true
+    ) {
         failedSleepState = capsLockOn
-        nextSleepStateRetryAt = now.addingTimeInterval(helperRetryInterval)
+        nextSleepStateRetryAt = now.advanced(by: .seconds(helperRetryInterval))
         if resetVerification {
             nextSleepStateVerificationAt = nextSleepStateRetryAt
         }
@@ -607,12 +638,16 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         updateStatusError()
     }
 
-    private func markSleepStateConfirmed(_ capsLockOn: Bool, at now: Date, reason: String) {
+    private func markSleepStateConfirmed(
+        _ capsLockOn: Bool,
+        at now: ContinuousClock.Instant,
+        reason: String
+    ) {
         hasLoggedMissingSleepState = false
         failedSleepState = nil
         menuModel?.helperFailing = false
-        nextSleepStateRetryAt = .distantPast
-        nextSleepStateVerificationAt = now.addingTimeInterval(sleepStateVerificationInterval)
+        nextSleepStateRetryAt = nil
+        nextSleepStateVerificationAt = now.advanced(by: .seconds(sleepStateVerificationInterval))
         // Keep the popover's status pill / LED live even while it is open (e.g. the
         // battery floor releasing keep-awake flips it to OFF without a reopen).
         menuModel?.keepingAwake = capsLockOn
@@ -623,13 +658,13 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     private func evaluateDisplaySleepForClosedLid(capsLockOn: Bool, reason: String) {
         guard Preferences.displaySleepOnLidClose else {
             didRequestDisplaySleepForClosedLid = false
-            nextDisplaySleepRetryAt = .distantPast
+            nextDisplaySleepRetryAt = nil
             return
         }
 
         guard capsLockOn else {
             didRequestDisplaySleepForClosedLid = false
-            nextDisplaySleepRetryAt = .distantPast
+            nextDisplaySleepRetryAt = nil
             return
         }
 
@@ -645,7 +680,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
 
         guard clamshellClosed else {
             didRequestDisplaySleepForClosedLid = false
-            nextDisplaySleepRetryAt = .distantPast
+            nextDisplaySleepRetryAt = nil
             return
         }
 
@@ -657,7 +692,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             externalDisplayConnected: externalDisplayConnected
         ) else {
             didRequestDisplaySleepForClosedLid = false
-            nextDisplaySleepRetryAt = .distantPast
+            nextDisplaySleepRetryAt = nil
             if externalDisplayConnected == nil, !hasLoggedMissingDisplayState {
                 log("\(reason) external_display_state_unavailable")
                 hasLoggedMissingDisplayState = true
@@ -666,16 +701,16 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         }
 
         guard !didRequestDisplaySleepForClosedLid else { return }
-        let now = Date()
-        guard now >= nextDisplaySleepRetryAt else { return }
+        let now = ContinuousClock.now
+        if let retryAt = nextDisplaySleepRetryAt, now < retryAt { return }
 
         let result = runHelper(displaySleepHelperMode)
         log("\(reason) clamshell=closed display_sleep_status=\(result.status) stdout=\(result.stdout) stderr=\(result.stderr)")
         if result.status == 0 {
             didRequestDisplaySleepForClosedLid = true
-            nextDisplaySleepRetryAt = .distantPast
+            nextDisplaySleepRetryAt = nil
         } else {
-            nextDisplaySleepRetryAt = now.addingTimeInterval(helperRetryInterval)
+            nextDisplaySleepRetryAt = now.advanced(by: .seconds(helperRetryInterval))
         }
     }
 
@@ -699,6 +734,9 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     /// tooltip used to read "Caps Lock OFF: normal sleep" while Auto was the selected
     /// mode — the app narrating a control the user was not using.
     private func tooltipText(capsLockOn: Bool, strings: AppStrings) -> String {
+        if case .awakePowerUnknown = keepAwakeStatus {
+            return strings.tooltipPowerUnknown
+        }
         if case .overriding(let percent) = keepAwakeStatus {
             return TextTemplate.fill(strings.batteryFloorOverrideDetailFormat, [
                 "battery": percent,
@@ -738,13 +776,18 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         signal(SIGINT, SIG_IGN)
         signal(SIGTERM, SIG_IGN)
 
+        // A dedicated queue, not `.main`. This handler exists to put system sleep back
+        // while the app is being killed — including when the main actor is stuck, which
+        // is exactly when it matters. Running it there meant a blocked main actor made
+        // the app unkillable by anything but SIGKILL, and SIGKILL skips the restore
+        // entirely, leaving sleep disabled system-wide.
         for signalNumber in [SIGINT, SIGTERM] {
-            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
-            source.setEventHandler { [weak self] in
-                let result = self?.runHelper("off")
-                self?.log(
-                    "signal=\(signalNumber) restore_off helper_status=\(result?.status ?? -1) "
-                        + "stdout=\(result?.stdout ?? "") stderr=\(result?.stderr ?? "")"
+            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: Self.signalQueue)
+            source.setEventHandler {
+                let result = Self.restoreSleepOffActor()
+                Self.appendLog(
+                    "signal=\(signalNumber) restore_off helper_status=\(result.status) "
+                        + "stdout=\(result.stdout) stderr=\(result.stderr)"
                 )
                 exit(0)
             }
@@ -753,7 +796,26 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         }
     }
 
+    private nonisolated static let signalQueue = DispatchQueue(label: "\(appLabel).signal")
+
+    /// Putting sleep back must not need the main actor, for the same reason the handler
+    /// does not run there.
+    private nonisolated static func restoreSleepOffActor() -> (status: Int32, stdout: String, stderr: String) {
+        CommandRunner.run("/usr/bin/sudo", ["-n", helperPath, "off"])
+    }
+
     private func log(_ message: String) {
+        Self.appendLog(message)
+    }
+
+    /// One rollover kept, no dated archive. A permanently failing helper retries every
+    /// five seconds forever, which is on the order of a megabyte a day of identical
+    /// lines into a file nothing was trimming.
+    private nonisolated static let maxLogBytes: UInt64 = 1_000_000
+
+    /// `nonisolated` so the signal handlers, which deliberately run off the main actor,
+    /// can still record what they did.
+    nonisolated static func appendLog(_ message: String) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
         let line = "\(timestamp) \(message)\n"
         let url = URL(fileURLWithPath: logPath)
@@ -764,13 +826,20 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
 
         guard let data = line.data(using: .utf8) else { return }
 
-        if FileManager.default.fileExists(atPath: logPath),
-           let handle = try? FileHandle(forWritingTo: url) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            _ = try? handle.write(contentsOf: data)
-        } else {
+        guard FileManager.default.fileExists(atPath: logPath),
+              let handle = try? FileHandle(forWritingTo: url) else {
             try? data.write(to: url)
+            return
         }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        _ = try? handle.write(contentsOf: data)
+
+        // Renaming out from under the open handle is safe: this write already landed,
+        // and the next call finds no file at logPath and starts a fresh one.
+        guard let size = try? handle.offset(), size > maxLogBytes else { return }
+        let rotated = url.appendingPathExtension("1")
+        try? FileManager.default.removeItem(at: rotated)
+        try? FileManager.default.moveItem(at: url, to: rotated)
     }
 }

@@ -135,6 +135,10 @@ struct AppStrings {
     let tooltipKeepAwakeOn: String
     let tooltipKeepAwakeOff: String
     /// The held state: the mode wants the Mac awake, the battery floor is releasing it.
+    /// Awake, but the power source could not be read, so the floor is not being
+    /// enforced. Every other status reaches a surface; without this one it existed only
+    /// in the log.
+    let tooltipPowerUnknown: String
     let statusHeld: String
     let batteryFloorHeldFormat: String
     let tooltipHeldFormat: String
@@ -184,6 +188,7 @@ struct AppStrings {
                 batteryFloorDesc: "On battery, allow sleep at or below this level, so there is charge left in reserve instead of running the battery flat.",
                 tooltipKeepAwakeOn: "Keep awake ON: processes stay awake",
                 tooltipKeepAwakeOff: "Keep awake OFF: normal sleep",
+                tooltipPowerUnknown: "Keep awake ON — the power source cannot be read, so the battery floor is not being applied",
                 statusHeld: "PAUSED",
                 batteryFloorHeldFormat: "Battery {battery}% · resumes {recover}%",
                 tooltipHeldFormat: "Paused by the battery floor: {battery}% is at or below {floor}%. Resumes at {recover}% or on AC.",
@@ -225,6 +230,7 @@ struct AppStrings {
                 batteryFloorDesc: "배터리 사용 중에는 이 수준 이하에서 잠자기를 허용해 잔량을 남겨 둡니다.",
                 tooltipKeepAwakeOn: "잠자기 방지 켜짐: 작업이 계속 실행됩니다",
                 tooltipKeepAwakeOff: "잠자기 방지 꺼짐: 평소 잠자기",
+                tooltipPowerUnknown: "잠자기 방지 켜짐 — 전원 상태를 읽을 수 없어 배터리 하한이 적용되지 않습니다",
                 statusHeld: "일시 중지",
                 batteryFloorHeldFormat: "{battery}% · {recover}%에서 재개",
                 tooltipHeldFormat: "배터리 하한으로 중지됨: {battery}%가 {floor}% 이하입니다. {recover}% 또는 전원 연결 시 재개합니다.",
@@ -266,6 +272,7 @@ struct AppStrings {
                 batteryFloorDesc: "バッテリー駆動時、この残量以下でスリープを許可。使い切る前に余力を残します。",
                 tooltipKeepAwakeOn: "スリープ抑止中: 処理は動き続けます",
                 tooltipKeepAwakeOff: "スリープ抑止オフ: 通常のスリープ動作",
+                tooltipPowerUnknown: "スリープ抑止中 — 電源状態が読めないため、バッテリー下限は適用されていません",
                 statusHeld: "一時停止",
                 batteryFloorHeldFormat: "残量{battery}% · {recover}%で再開",
                 tooltipHeldFormat: "バッテリー下限で一時停止中: {battery}%は{floor}%以下です。{recover}%か電源接続で再開します。",
@@ -307,6 +314,7 @@ struct AppStrings {
                 batteryFloorDesc: "使用电池时，在此电量或以下允许睡眠，为电池保留余量。",
                 tooltipKeepAwakeOn: "防止睡眠已开启：任务将保持运行",
                 tooltipKeepAwakeOff: "防止睡眠已关闭：正常睡眠",
+                tooltipPowerUnknown: "防止睡眠已开启 — 无法读取电源状态，电量下限未生效",
                 statusHeld: "已暂停",
                 batteryFloorHeldFormat: "电量 {battery}% · {recover}% 恢复",
                 tooltipHeldFormat: "已被电量下限暂停：{battery}% 低于或等于 {floor}%。达到 {recover}% 或接通电源后恢复。",
