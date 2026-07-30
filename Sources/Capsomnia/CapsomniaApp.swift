@@ -601,7 +601,16 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
 
         let mode = capsLockOn ? "on" : "off"
         let result = runHelper(mode)
-        log("\(reason) capslock=\(mode) helper_status=\(result.status) stdout=\(result.stdout) stderr=\(result.stderr)")
+        // `keep_awake=`, not `capslock=`. The parameter is named capsLockOn but every caller passes
+        // desiredKeepAwake(reason:) -- the DECISION, not the key. So in auto mode this line printed
+        // `capslock=on` in the same second that logStatusChange printed `capslock_flag=off`, and the
+        // two contradicted each other. Six such pairs exist in the log, all with mode=auto.
+        //
+        // Renamed 2026-07-30 after that contradiction cost real time: while investigating Tom's
+        // network instability I read these two lines, concluded the app had a state desync, and was
+        // about to report it as a defect. It is not one -- the behaviour is correct -- but a log that
+        // says `capslock=on` while Caps Lock is off will mislead the next reader the same way.
+        log("\(reason) keep_awake=\(mode) helper_status=\(result.status) stdout=\(result.stdout) stderr=\(result.stderr)")
 
         guard result.status == 0 else {
             markSleepStateFailed(capsLockOn, at: now, resetVerification: false)
