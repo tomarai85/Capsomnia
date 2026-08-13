@@ -71,6 +71,7 @@ final class SettingsWindowControllerTests: XCTestCase {
             onLanguageChange: { _ in },
             onLaunchAtLoginChange: { _ in },
             onDisplaySleepOnLidCloseChange: { _ in },
+            onIgnoreExternalCapsOffChange: { _ in },
             onKeepAwakeModeChange: { _ in },
             onBatteryFloorEnabledChange: { _ in },
             onBatteryFloorPercentChange: { _ in },

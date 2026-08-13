@@ -43,6 +43,9 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     /// after a relaunch — including one that followed a crash — the app must come back
     /// on the safe side rather than silently still overriding a safety limit.
     private var batteryFloorOverride = false
+    /// Whether the closed-lid guard is currently holding the intent against an external
+    /// Caps Lock off. Tracked only so engage/release each log ONCE instead of per poll.
+    private var externalCapsOffHeld = false
     /// The reasoned keep-awake state, and the copy of it the UI has already been told
     /// about. The status can change without the applied on/off state changing (the floor
     /// engaging, an override being taken), and those changes have to reach the menu bar.
@@ -366,6 +369,9 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
                 onDisplaySleepOnLidCloseChange: { [weak self] enabled in
                     self?.setDisplaySleepOnLidClose(enabled)
                 },
+                onIgnoreExternalCapsOffChange: { [weak self] enabled in
+                    self?.setIgnoreExternalCapsOffWhileLidClosed(enabled)
+                },
                 onKeepAwakeModeChange: { [weak self] mode in
                     self?.setKeepAwakeMode(mode)
                 },
@@ -416,6 +422,14 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             rebuildStatusMenu()
             log("preference launch_at_login_error=\(error.localizedDescription)")
         }
+    }
+
+    private func setIgnoreExternalCapsOffWhileLidClosed(_ enabled: Bool) {
+        Preferences.ignoreExternalCapsLockOffWhileLidClosed = enabled
+        // Turning the guard OFF while it is holding must release on the spot, not on the
+        // next flag change; re-apply so the poll's decision runs once with the new rule.
+        applyCurrentCapsLockState(reason: "preference")
+        log("preference ignore_external_caps_off_while_lid_closed=\(enabled ? "on" : "off")")
     }
 
     private func setDisplaySleepOnLidClose(_ enabled: Bool) {
@@ -482,7 +496,32 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         case .off:
             intent = false
         case .capsLock:
-            intent = CGEventSource.flagsState(.hidSystemState).contains(.maskAlphaShift)
+            let flagOn = CGEventSource.flagsState(.hidSystemState).contains(.maskAlphaShift)
+            // Closed-lid guard (ported from upstream v3.1.0, adapted — see
+            // ClosedLidCapsLockGuard): an off observed while the lid is closed came from
+            // an external source, so the intent holds instead of following it. The
+            // clamshell read only happens on the rare poll where the flag is off while
+            // the applied state was on, never on the steady 250ms path.
+            if !flagOn,
+               ClosedLidCapsLockGuard.shouldHoldIntent(
+                   preferenceEnabled: Preferences.ignoreExternalCapsLockOffWhileLidClosed,
+                   mode: .capsLock,
+                   capsLockFlagOn: flagOn,
+                   lastAppliedKeepAwake: lastAppliedState,
+                   clamshellClosed: ClamshellStateReader.isClosed()
+               ) {
+                intent = true
+                if !externalCapsOffHeld {
+                    externalCapsOffHeld = true
+                    log("\(reason) external_caps_off_held clamshell=closed — intent held, flag=off")
+                }
+            } else {
+                intent = flagOn
+                if externalCapsOffHeld {
+                    externalCapsOffHeld = false
+                    log("\(reason) external_caps_off_released flag=\(flagOn ? "on" : "off")")
+                }
+            }
         case .auto:
             intent = true
         }

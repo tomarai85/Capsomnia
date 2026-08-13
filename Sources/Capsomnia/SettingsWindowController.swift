@@ -31,6 +31,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let displaySleepOnLidCloseDesc = brandLabel(size: 12, color: Brand.textDim, wraps: true)
     private let displaySleepOnLidCloseToggle = LEDToggle(isOn: Preferences.displaySleepOnLidClose)
 
+    private let ignoreExternalCapsOffTitle = brandLabel(size: 13, weight: .medium, color: Brand.text)
+    private let ignoreExternalCapsOffDesc = brandLabel(size: 12, color: Brand.textDim, wraps: true)
+    private let ignoreExternalCapsOffToggle = LEDToggle(isOn: Preferences.ignoreExternalCapsLockOffWhileLidClosed)
+
     private let keepAwakeModeTitleLabel = brandLabel(size: 13, weight: .medium, color: Brand.text)
     private let keepAwakeModeDescLabel = brandLabel(size: 12, color: Brand.textDim, wraps: true)
     private let keepAwakeModePopUp = LanguagePopUpButton(
@@ -71,6 +75,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let onLanguageChange: (AppLanguage) -> Void
     private let onLaunchAtLoginChange: (Bool) -> Void
     private let onDisplaySleepOnLidCloseChange: (Bool) -> Void
+    private let onIgnoreExternalCapsOffChange: (Bool) -> Void
     private let onKeepAwakeModeChange: (KeepAwakeMode) -> Void
     private let onBatteryFloorEnabledChange: (Bool) -> Void
     private let onBatteryFloorPercentChange: (Int) -> Void
@@ -82,6 +87,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         onLanguageChange: @escaping (AppLanguage) -> Void,
         onLaunchAtLoginChange: @escaping (Bool) -> Void,
         onDisplaySleepOnLidCloseChange: @escaping (Bool) -> Void,
+        onIgnoreExternalCapsOffChange: @escaping (Bool) -> Void,
         onKeepAwakeModeChange: @escaping (KeepAwakeMode) -> Void,
         onBatteryFloorEnabledChange: @escaping (Bool) -> Void,
         onBatteryFloorPercentChange: @escaping (Int) -> Void,
@@ -91,6 +97,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         self.onLanguageChange = onLanguageChange
         self.onLaunchAtLoginChange = onLaunchAtLoginChange
         self.onDisplaySleepOnLidCloseChange = onDisplaySleepOnLidCloseChange
+        self.onIgnoreExternalCapsOffChange = onIgnoreExternalCapsOffChange
         self.onKeepAwakeModeChange = onKeepAwakeModeChange
         self.onBatteryFloorEnabledChange = onBatteryFloorEnabledChange
         self.onBatteryFloorPercentChange = onBatteryFloorPercentChange
@@ -140,6 +147,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         menuBarDesc.stringValue = strings.showMenuBarIconDesc
         displaySleepOnLidCloseTitle.stringValue = strings.displaySleepOnLidClose
         displaySleepOnLidCloseDesc.stringValue = strings.displaySleepOnLidCloseDesc
+        ignoreExternalCapsOffTitle.stringValue = strings.ignoreExternalCapsLockOffWhileLidClosed
+        ignoreExternalCapsOffDesc.stringValue = strings.ignoreExternalCapsLockOffWhileLidClosedDesc
         openAtLoginTitle.stringValue = strings.openAtLogin
         openAtLoginDesc.stringValue = strings.openAtLoginDesc
         languageTitle.stringValue = "Language"
@@ -339,6 +348,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             self?.onDisplaySleepOnLidCloseChange(enabled)
             self?.updateValues()
         }
+        ignoreExternalCapsOffToggle.onToggle = { [weak self] enabled in
+            self?.onIgnoreExternalCapsOffChange(enabled)
+        }
         languagePopUp.onSelect = { [weak self] rawValue in
             guard let language = AppLanguage(rawValue: rawValue) else { return }
             self?.onLanguageChange(language)
@@ -372,10 +384,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             desc: displaySleepOnLidCloseDesc,
             accessory: displaySleepOnLidCloseToggle
         )
+        let ignoreExternalCapsOffRow = settingRow(
+            title: ignoreExternalCapsOffTitle,
+            desc: ignoreExternalCapsOffDesc,
+            accessory: ignoreExternalCapsOffToggle
+        )
         let openAtLoginRow = settingRow(title: openAtLoginTitle, desc: openAtLoginDesc, accessory: openAtLoginToggle)
         let languageRow = settingRow(title: languageTitle, desc: nil, accessory: languagePopUp)
 
-        let dividers = (0..<5).map { _ in brandDivider() }
+        let dividers = (0..<6).map { _ in brandDivider() }
 
         let rows: [NSView] = [
             keepAwakeModeRow,
@@ -386,8 +403,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             dividers[2],
             displaySleepOnLidCloseRow,
             dividers[3],
-            openAtLoginRow,
+            ignoreExternalCapsOffRow,
             dividers[4],
+            openAtLoginRow,
+            dividers[5],
             languageRow
         ]
 
@@ -465,6 +484,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func updateValues() {
         menuBarToggle.setOn(Preferences.showMenuBarIcon)
         displaySleepOnLidCloseToggle.setOn(Preferences.displaySleepOnLidClose)
+        ignoreExternalCapsOffToggle.setOn(Preferences.ignoreExternalCapsLockOffWhileLidClosed)
         openAtLoginToggle.setOn(Preferences.launchAtLogin)
         languagePopUp.setSelected(Preferences.language.rawValue)
         keepAwakeModePopUp.setSelected(Preferences.keepAwakeMode.rawValue)

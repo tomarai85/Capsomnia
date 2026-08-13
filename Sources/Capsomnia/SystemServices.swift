@@ -177,6 +177,38 @@ enum DisplaySleepPolicy {
     }
 }
 
+/// While the lid is closed the built-in keyboard cannot be pressed, so a Caps Lock
+/// turn-off observed in that window comes from an external source — the measured case is
+/// a remote desktop client syncing its own keyboard state onto this Mac. Honoring it
+/// releases sleep prevention in the middle of exactly the session it was protecting.
+///
+/// Ported from upstream v3.1.0 (fuji-mak/Capsomnia PR #76, `ExternalCapsLockOffPolicy`),
+/// reshaped for this fork's poll-driven engine. Upstream RE-ASSERTS Caps Lock through its
+/// 2.x toggle coordinator; this fork's base predates that machinery, so the guard HOLDS
+/// THE INTENT instead: sleep prevention stays on while the lid is closed, and when the
+/// lid opens the flag (still off) is followed again — which fails toward normal sleep
+/// exactly when a human is back at the keyboard. Two upstream parameters are gone
+/// because their subjects do not exist here: `autoOffInProgress` (no auto-off timer) and
+/// `recentUserAction` (this fork's menu switches the MODE, never the caps flag, so a
+/// user turn-off from the menu leaves `.capsLock` mode and the guard with it).
+///
+/// `clamshellClosed == nil` (state unavailable) fails open: the turn-off is honored.
+enum ClosedLidCapsLockGuard {
+    static func shouldHoldIntent(
+        preferenceEnabled: Bool,
+        mode: KeepAwakeMode,
+        capsLockFlagOn: Bool,
+        lastAppliedKeepAwake: Bool?,
+        clamshellClosed: Bool?
+    ) -> Bool {
+        preferenceEnabled
+            && mode == .capsLock
+            && !capsLockFlagOn
+            && lastAppliedKeepAwake == true
+            && clamshellClosed == true
+    }
+}
+
 /// A point-in-time read of the power source, via IOKit power sources (no subprocess).
 enum BatteryReader {
     struct Snapshot {

@@ -109,6 +109,8 @@ struct AppStrings {
     let openAtLoginDesc: String
     let displaySleepOnLidClose: String
     let displaySleepOnLidCloseDesc: String
+    let ignoreExternalCapsLockOffWhileLidClosed: String
+    let ignoreExternalCapsLockOffWhileLidClosedDesc: String
     let openCapsomnia: String
     let quit: String
     let settingsTitle: String
@@ -164,6 +166,8 @@ struct AppStrings {
                 openAtLoginDesc: "Launch Capsomnia automatically after you sign in.",
                 displaySleepOnLidClose: "Turn display off when lid closes",
                 displaySleepOnLidCloseDesc: "When Caps Lock is on, let the display sleep after closing the lid only if no external display is connected.",
+                ignoreExternalCapsLockOffWhileLidClosed: "Ignore Caps Lock turn-offs while the lid is closed",
+                ignoreExternalCapsLockOffWhileLidClosedDesc: "While the lid is closed, sleep prevention stays on even if Caps Lock is turned off — for example by a remote desktop client syncing its keyboard state. Opening the lid or switching the mode from the menu turns it off as usual.",
                 openCapsomnia: "Open Capsomnia",
                 quit: "Quit",
                 settingsTitle: "Settings",
@@ -206,6 +210,8 @@ struct AppStrings {
                 openAtLoginDesc: "로그인하면 Capsomnia를 자동으로 실행합니다.",
                 displaySleepOnLidClose: "덮개를 닫을 때 화면 끄기",
                 displaySleepOnLidCloseDesc: "Caps Lock이 켜져 있으면 외부 디스플레이가 연결되지 않은 경우에만 덮개를 닫을 때 화면을 끕니다.",
+                ignoreExternalCapsLockOffWhileLidClosed: "덮개를 닫은 동안 Caps Lock에 의한 끄기 무시",
+                ignoreExternalCapsLockOffWhileLidClosedDesc: "덮개가 닫혀 있는 동안에는 Caps Lock이 꺼져도 잠자기 방지를 유지합니다. 원격 데스크톱 연결 등으로 의도치 않게 해제되는 것을 방지합니다. 덮개를 열거나 메뉴에서 모드를 바꾸면 평소대로 꺼집니다.",
                 openCapsomnia: "Capsomnia 열기",
                 quit: "종료",
                 settingsTitle: "설정",
@@ -248,6 +254,8 @@ struct AppStrings {
                 openAtLoginDesc: "サインイン後にCapsomniaを自動で起動します。",
                 displaySleepOnLidClose: "蓋を閉じたら画面をオフ",
                 displaySleepOnLidCloseDesc: "Caps Lock ON中は、外部ディスプレイが接続されていない場合のみ、蓋を閉じたら画面を暗くします。",
+                ignoreExternalCapsLockOffWhileLidClosed: "蓋を閉じている間はCaps Lockによるオフを無視",
+                ignoreExternalCapsLockOffWhileLidClosedDesc: "蓋を閉じている間は、Caps Lockがオフになってもスリープ抑止を維持します。リモートデスクトップ接続などで意図せず解除されるのを防ぎます。蓋を開けるか、メニューでモードを切り替えれば通常どおりオフにできます。",
                 openCapsomnia: "Capsomniaを開く",
                 quit: "終了",
                 settingsTitle: "設定",
@@ -290,6 +298,8 @@ struct AppStrings {
                 openAtLoginDesc: "登录后自动启动 Capsomnia。",
                 displaySleepOnLidClose: "合盖时关闭显示屏",
                 displaySleepOnLidCloseDesc: "Caps Lock 开启时，仅在未连接外接显示器的情况下，合盖后让显示屏进入睡眠。",
+                ignoreExternalCapsLockOffWhileLidClosed: "合盖期间忽略 Caps Lock 的关闭操作",
+                ignoreExternalCapsLockOffWhileLidClosedDesc: "合盖期间，即使 Caps Lock 被关闭也会保持防睡眠，防止远程桌面连接等意外解除防睡眠。打开盖子或在菜单中切换模式即可正常关闭。",
                 openCapsomnia: "打开 Capsomnia",
                 quit: "退出",
                 settingsTitle: "设置",
@@ -332,6 +342,7 @@ private enum PreferenceKey {
     static let language = "Language"
     static let launchAtLogin = "LaunchAtLogin"
     static let displaySleepOnLidClose = "DisplaySleepOnLidClose"
+    static let ignoreExternalCapsLockOffWhileLidClosed = "IgnoreExternalCapsLockOffWhileLidClosed"
     static let keepAwakeMode = "KeepAwakeMode"
     static let batteryFloorEnabled = "BatteryFloorEnabled"
     static let batteryFloorPercent = "BatteryFloorPercent"
@@ -350,6 +361,7 @@ enum Preferences {
             PreferenceKey.language: AppLanguage.defaultLanguage.rawValue,
             PreferenceKey.launchAtLogin: true,
             PreferenceKey.displaySleepOnLidClose: true,
+            PreferenceKey.ignoreExternalCapsLockOffWhileLidClosed: false,
             PreferenceKey.keepAwakeMode: KeepAwakeMode.capsLock.rawValue,
             PreferenceKey.batteryFloorEnabled: true,
             PreferenceKey.batteryFloorPercent: 15,
@@ -381,6 +393,15 @@ enum Preferences {
     static var displaySleepOnLidClose: Bool {
         get { defaults.bool(forKey: PreferenceKey.displaySleepOnLidClose) }
         set { defaults.set(newValue, forKey: PreferenceKey.displaySleepOnLidClose) }
+    }
+
+    /// While the lid is closed the built-in keyboard cannot be pressed, so a Caps Lock
+    /// turn-off observed then comes from an external source (a remote desktop client
+    /// syncing keyboard state). When enabled, such turn-offs do not release sleep
+    /// prevention. Ported from upstream v3.1.0 — see ClosedLidCapsLockGuard.
+    static var ignoreExternalCapsLockOffWhileLidClosed: Bool {
+        get { defaults.bool(forKey: PreferenceKey.ignoreExternalCapsLockOffWhileLidClosed) }
+        set { defaults.set(newValue, forKey: PreferenceKey.ignoreExternalCapsLockOffWhileLidClosed) }
     }
 
     static var keepAwakeMode: KeepAwakeMode {
