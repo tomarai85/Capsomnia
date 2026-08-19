@@ -61,6 +61,46 @@ final class ClosedLidCapsLockGuardTests: XCTestCase {
         XCTAssertFalse(hold(clamshell: false))
     }
 
+    /// Negative control for the cost the guard is supposed to avoid: the clamshell read
+    /// is an IOKit registry lookup made from the 250ms poll, and every one of the cheap
+    /// conditions must be able to stop it. Revert `clamshellClosed` to a plain parameter
+    /// and this fails on the first row — which is precisely what shipped for a month.
+    func testClamshellIsNotReadUntilEveryCheapConditionAgrees() {
+        var reads = 0
+        func holdCounting(
+            pref: Bool = true,
+            mode: KeepAwakeMode = .capsLock,
+            flagOn: Bool = false,
+            lastApplied: Bool? = true
+        ) -> Bool {
+            ClosedLidCapsLockGuard.shouldHoldIntent(
+                preferenceEnabled: pref,
+                mode: mode,
+                capsLockFlagOn: flagOn,
+                lastAppliedKeepAwake: lastApplied,
+                clamshellClosed: { reads += 1; return true }()
+            )
+        }
+
+        XCTAssertFalse(holdCounting(pref: false))
+        XCTAssertEqual(reads, 0, "preference off must not reach the lid")
+
+        XCTAssertFalse(holdCounting(mode: .off))
+        XCTAssertFalse(holdCounting(mode: .auto))
+        XCTAssertEqual(reads, 0, "other modes must not reach the lid")
+
+        XCTAssertTrue(holdCounting(flagOn: true) == false)
+        XCTAssertEqual(reads, 0, "an on flag has nothing to hold, so it must not reach the lid")
+
+        XCTAssertFalse(holdCounting(lastApplied: false))
+        XCTAssertFalse(holdCounting(lastApplied: nil))
+        XCTAssertEqual(reads, 0, "nothing applied means nothing to continue; must not reach the lid")
+
+        // Only when all four agree is the lid worth the lookup.
+        XCTAssertTrue(holdCounting())
+        XCTAssertEqual(reads, 1)
+    }
+
     /// Interaction pin: the guard shapes INTENT only. The battery floor keeps final
     /// authority — a held intent below the floor must still release, or the guard
     /// would quietly disable the safety that keeps charge in reserve.

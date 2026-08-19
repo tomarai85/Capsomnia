@@ -501,7 +501,11 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             // ClosedLidCapsLockGuard): an off observed while the lid is closed came from
             // an external source, so the intent holds instead of following it. The
             // clamshell read only happens on the rare poll where the flag is off while
-            // the applied state was on, never on the steady 250ms path.
+            // the applied state was on, never on the steady 250ms path — which holds
+            // only because `clamshellClosed` is an `@autoclosure`. It was a plain
+            // parameter until 2026-08-20, and a plain parameter is evaluated before the
+            // call: this IOKit lookup ran at 4Hz for the whole time Caps Lock was off,
+            // exactly the steady path the sentence above promises it avoids.
             if !flagOn,
                ClosedLidCapsLockGuard.shouldHoldIntent(
                    preferenceEnabled: Preferences.ignoreExternalCapsLockOffWhileLidClosed,

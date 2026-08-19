@@ -193,19 +193,27 @@ enum DisplaySleepPolicy {
 /// user turn-off from the menu leaves `.capsLock` mode and the guard with it).
 ///
 /// `clamshellClosed == nil` (state unavailable) fails open: the turn-off is honored.
+///
+/// `clamshellClosed` is an `@autoclosure` on purpose. The caller passes
+/// `ClamshellStateReader.isClosed()`, an IOKit registry lookup, from the 250ms poll — and
+/// a plain parameter is evaluated BEFORE the call, so that lookup ran four times a second
+/// for as long as Caps Lock was off, no matter how the cheap conditions stood. Behind
+/// `&&` (whose own right-hand side is already `@autoclosure`) it is reached only when
+/// preference, mode, flag and last-applied state have all already agreed, which is the
+/// rare poll the call site's comment describes.
 enum ClosedLidCapsLockGuard {
     static func shouldHoldIntent(
         preferenceEnabled: Bool,
         mode: KeepAwakeMode,
         capsLockFlagOn: Bool,
         lastAppliedKeepAwake: Bool?,
-        clamshellClosed: Bool?
+        clamshellClosed: @autoclosure () -> Bool?
     ) -> Bool {
         preferenceEnabled
             && mode == .capsLock
             && !capsLockFlagOn
             && lastAppliedKeepAwake == true
-            && clamshellClosed == true
+            && clamshellClosed() == true
     }
 }
 
