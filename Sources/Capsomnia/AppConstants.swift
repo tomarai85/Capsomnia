@@ -11,6 +11,9 @@ let logPath = logDirectoryURL
     .appendingPathComponent("capsomnia.log")
     .path
 let openSettingsNotificationName = Notification.Name("\(appLabel).openSettings")
+/// Shown verbatim in the exit-restore-failure alert (D6). Not localized — it is a shell
+/// command, not prose.
+let sleepRestoreCommand = "sudo pmset -a disablesleep 0"
 
 /// Colors lifted straight from the landing page (docs/styles.css :root).
 enum Brand {
@@ -150,6 +153,13 @@ struct AppStrings {
     let batteryFloorOverrideSubtitleFormat: String
     /// Tooltip: no chip beside it, so it has to name what it is on its own.
     let batteryFloorOverrideDetailFormat: String
+    /// D6: shown in a plain `NSAlert` (not the glass popover) when the explicit Quit
+    /// path's restore-at-exit fails.
+    let exitRestoreFailedTitle: String
+    let exitRestoreFailedMessage: String
+    let copyCommand: String
+    let tryAgain: String
+    let quitAnyway: String
 
     static func current() -> AppStrings {
         localized(for: Preferences.language)
@@ -199,7 +209,12 @@ struct AppStrings {
                 batteryFloorOverride: "Stay awake",
                 batteryFloorOverrideActive: "Overriding",
                 batteryFloorOverrideSubtitleFormat: "{battery}% · sleeps at {critical}%",
-                batteryFloorOverrideDetailFormat: "Floor overridden · {battery}%, sleeps at {critical}%"
+                batteryFloorOverrideDetailFormat: "Floor overridden · {battery}%, sleeps at {critical}%",
+                exitRestoreFailedTitle: "Couldn't restore sleep",
+                exitRestoreFailedMessage: "System sleep is still disabled. Run this command to fix it:",
+                copyCommand: "Copy Command",
+                tryAgain: "Try Again",
+                quitAnyway: "Quit Anyway"
             )
         case .korean:
             AppStrings(
@@ -243,7 +258,12 @@ struct AppStrings {
                 batteryFloorOverride: "그래도 유지",
                 batteryFloorOverrideActive: "무시 중",
                 batteryFloorOverrideSubtitleFormat: "{battery}% · {critical}%에서 잠자기",
-                batteryFloorOverrideDetailFormat: "하한 무시 중 · {battery}%, {critical}%에서 잠자기"
+                batteryFloorOverrideDetailFormat: "하한 무시 중 · {battery}%, {critical}%에서 잠자기",
+                exitRestoreFailedTitle: "절전 모드를 되돌리지 못했습니다",
+                exitRestoreFailedMessage: "시스템 절전이 아직 비활성화되어 있습니다. 아래 명령을 실행하세요:",
+                copyCommand: "명령 복사",
+                tryAgain: "다시 시도",
+                quitAnyway: "그래도 종료"
             )
         case .japanese:
             AppStrings(
@@ -287,7 +307,12 @@ struct AppStrings {
                 batteryFloorOverride: "無視して起こす",
                 batteryFloorOverrideActive: "無視中",
                 batteryFloorOverrideSubtitleFormat: "残量{battery}% · {critical}%でスリープ",
-                batteryFloorOverrideDetailFormat: "下限を無視中 · {battery}%、{critical}%でスリープ"
+                batteryFloorOverrideDetailFormat: "下限を無視中 · {battery}%、{critical}%でスリープ",
+                exitRestoreFailedTitle: "スリープを戻せませんでした",
+                exitRestoreFailedMessage: "システムスリープがまだ無効です。次のコマンドを実行してください:",
+                copyCommand: "コマンドをコピー",
+                tryAgain: "もう一度試す",
+                quitAnyway: "このまま終了"
             )
         case .simplifiedChinese:
             AppStrings(
@@ -331,7 +356,12 @@ struct AppStrings {
                 batteryFloorOverride: "保持唤醒",
                 batteryFloorOverrideActive: "忽略中",
                 batteryFloorOverrideSubtitleFormat: "电量 {battery}% · {critical}% 时睡眠",
-                batteryFloorOverrideDetailFormat: "正在忽略下限 · {battery}%，{critical}% 时睡眠"
+                batteryFloorOverrideDetailFormat: "正在忽略下限 · {battery}%，{critical}% 时睡眠",
+                exitRestoreFailedTitle: "未能恢复睡眠",
+                exitRestoreFailedMessage: "系统睡眠仍处于禁用状态。请运行以下命令：",
+                copyCommand: "复制命令",
+                tryAgain: "重试",
+                quitAnyway: "仍然退出"
             )
         }
     }

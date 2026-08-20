@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import IOKit
 import IOKit.ps
+import os
 
 struct LaunchAgentError: LocalizedError {
     let message: String
@@ -127,6 +128,203 @@ enum SleepStateReader {
         }
 
         return nil
+    }
+}
+
+/// One-shot claim shared between `applicationWillTerminate` and the SIGINT/SIGTERM
+/// signal handler — proven necessary 2026-07-31: both fired for the same termination
+/// and both raced independent `sudo` calls. Backed by `OSAllocatedUnfairLock`, not an
+/// actor: the signal handler deliberately runs off the main actor (see
+/// `installSignalHandlers`), so a stuck main actor must not be able to make the app
+/// unkillable, which an actor hop into this type would reintroduce.
+final class ExitRestoreGate: @unchecked Sendable {
+    private let claimed = OSAllocatedUnfairLock(initialState: false)
+
+    /// `true` for the first caller only. Every caller after — including a caller that
+    /// arrives while the first is still mid-restore — gets `false` and must not attempt
+    /// the restore itself.
+    @discardableResult
+    func claim() -> Bool {
+        claimed.withLock { alreadyClaimed in
+            if alreadyClaimed { return false }
+            alreadyClaimed = true
+            return true
+        }
+    }
+}
+
+/// Which exit path still owes a restore, extracted from the app delegate so the
+/// hand-off between `applicationShouldTerminate` (the explicit-Quit flow, the only place
+/// termination can still be cancelled) and `applicationWillTerminate` is testable
+/// without AppKit.
+///
+/// The bug this exists to make impossible: the explicit-Quit flow marked itself handled
+/// so that `applicationWillTerminate` would not repeat the restore, but a termination
+/// the user then CANCELLED (the alert's "Copy command" branch) left that mark standing
+/// for the rest of the process's life — so the next termination, arriving through
+/// `applicationWillTerminate`, skipped the restore entirely and left `disablesleep=1`
+/// with nobody to clear it. A cancelled termination must put the debt back.
+struct QuitRestoreLedger: Equatable {
+    private(set) var handledForPendingTermination = false
+
+    /// The explicit-Quit flow ran the restore for the termination now in progress.
+    mutating func markHandled() {
+        handledForPendingTermination = true
+    }
+
+    /// The user cancelled that termination. The app keeps running, so the next
+    /// termination — whichever path it arrives on — owes a fresh restore.
+    mutating func terminationCancelled() {
+        handledForPendingTermination = false
+    }
+
+    /// Whether `applicationWillTerminate` should perform the restore itself.
+    var shouldRestoreOnWillTerminate: Bool {
+        !handledForPendingTermination
+    }
+}
+
+/// Extracted so the exit-code decision (D5) is testable without invoking the real
+/// SIGINT/SIGTERM handler, which really does call `exit()` and would kill the test
+/// process.
+enum ExitRestoreOutcome {
+    /// 0 for a confirmed or unneeded restore (the helper call itself reports success,
+    /// whether because it actively turned `disablesleep` back off or because it was
+    /// already off), 1 for a failed one. The Quit path never uses this — it never exits
+    /// non-zero, because a user Quit does not want the app resurrected behind them.
+    static func exitCode(helperStatus: Int32) -> Int32 {
+        helperStatus == 0 ? 0 : 1
+    }
+}
+
+/// The exit-time reliability breadcrumb (spec Design Decision D3/D4). Stored as a JSON
+/// file, not `UserDefaults` — this machine has an observed `UserDefaults` regression
+/// across a hard death (`KeepAwakeMode` silently reverted to a stale on-disk value
+/// after an unflushed cfprefsd write was lost), and a safety breadcrumb whose whole job
+/// is to survive exactly that kind of event must not ride the mechanism that lost data
+/// in exactly that kind of event.
+struct SleepStateBreadcrumb: Codable, Equatable {
+    static let currentVersion = 1
+
+    let version: Int
+    let generation: Int
+    let owned: Bool
+    /// What `SleepStateReader.isDisabled()` read immediately before Capsomnia's first
+    /// helper call to turn `disablesleep` on this cycle — `nil` when that read itself
+    /// failed. This is what lets a later reconciliation tell "Capsomnia's own on-state"
+    /// apart from "someone else already had this on."
+    let priorSleepDisabled: Bool?
+    let setAt: String
+    let pid: Int32
+}
+
+/// Reads and writes `SleepStateBreadcrumb` to
+/// `~/Library/Application Support/Capsomnia/sleep-state.json`. All writes go through a
+/// temp file in the SAME directory, `fsync`, then `rename()` over the target — a plain
+/// `Data.write(to:options:.atomic)` does not fsync, so the rename can still be atomic
+/// while the bytes behind it never reached disk before a hard death.
+enum SleepStateBreadcrumbStore {
+    static let directoryURL = FileManager.default
+        .homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Capsomnia")
+    static let fileURL = directoryURL.appendingPathComponent("sleep-state.json")
+
+    /// `nil` for "no file" and "unparsable" alike — both mean the same thing to every
+    /// caller: there is no live claim of ownership to reconcile against.
+    static func read(file: URL = fileURL) -> SleepStateBreadcrumb? {
+        guard let data = try? Data(contentsOf: file) else { return nil }
+        return try? JSONDecoder().decode(SleepStateBreadcrumb.self, from: data)
+    }
+
+    /// Marks that Capsomnia is ABOUT TO turn `disablesleep` on, before the helper call
+    /// that does it — the dirty bit must be raised before the risky operation, not
+    /// after, or a crash between the two leaves the system dirty and the bit clean.
+    ///
+    /// Claims OWNERSHIP only when `priorSleepDisabled` is a confirmed `false` (the read
+    /// that ran immediately before this call actually saw `disablesleep=0`). If it was
+    /// already `true` — `disablesleep` was on before Capsomnia acted at all — this
+    /// transition is not the one that turned sleep off; claiming ownership anyway would
+    /// let a later reconciliation clear a setting Capsomnia never set, which is the exact
+    /// class of bug D4 exists to prevent. An unreadable prior state (`nil`) fails
+    /// ownership the same way: not knowing the prior state is not knowing it was
+    /// Capsomnia's to begin with.
+    ///
+    /// It still WRITES the breadcrumb in all three cases, with `owned` recording which
+    /// one happened. Refusing to write at all was the first implementation and it was
+    /// wrong: the file has two jobs, and only one of them is ownership. The other is to
+    /// be the record that a process was mid-`disablesleep=on` when it died — and the
+    /// case where that record is most needed is precisely the case where
+    /// `SleepStateReader.isDisabled()` is returning `nil`, i.e. this machine's observed
+    /// `poll sleep_state_unavailable` episodes. A store that goes silent exactly when the
+    /// system is flaky is a store that reports "clean exit" for every unclean one.
+    ///
+    /// Returns whether OWNERSHIP was claimed, not whether the write succeeded.
+    @discardableResult
+    static func markAttemptingOn(
+        priorSleepDisabled: Bool?,
+        pid: Int32 = getpid(),
+        now: Date = Date(),
+        directory: URL = directoryURL,
+        file: URL = fileURL
+    ) -> Bool {
+        let owned = priorSleepDisabled == false
+
+        let breadcrumb = SleepStateBreadcrumb(
+            version: SleepStateBreadcrumb.currentVersion,
+            generation: (read(file: file)?.generation ?? 0) + 1,
+            owned: owned,
+            priorSleepDisabled: priorSleepDisabled,
+            setAt: ISO8601DateFormatter().string(from: now),
+            pid: pid
+        )
+        let wrote = write(breadcrumb, directory: directory, file: file)
+        return owned && wrote
+    }
+
+    /// Clears ownership after a confirmed off (poll-time `markSleepStateConfirmed`) or a
+    /// successful exit-time restore. Best-effort: a leftover file after this just means
+    /// the next launch logs a reconciliation finding that turns out to be harmless.
+    @discardableResult
+    static func clear(directory: URL = directoryURL, file: URL = fileURL) -> Bool {
+        (try? FileManager.default.removeItem(at: file)) != nil
+    }
+
+    private static func write(_ breadcrumb: SleepStateBreadcrumb, directory: URL, file: URL) -> Bool {
+        guard let data = try? JSONEncoder().encode(breadcrumb) else { return false }
+        guard (try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true
+        )) != nil else {
+            return false
+        }
+
+        // Same directory as the target: `rename()` is only atomic within one filesystem.
+        let tempURL = directory.appendingPathComponent(".sleep-state.\(UUID().uuidString).tmp")
+        let fd = Darwin.open(tempURL.path, O_CREAT | O_WRONLY | O_TRUNC, 0o644)
+        guard fd >= 0 else { return false }
+
+        let wroteAll = data.withUnsafeBytes { buffer -> Bool in
+            guard let base = buffer.baseAddress, buffer.count > 0 else { return buffer.count == 0 }
+            var written = 0
+            while written < buffer.count {
+                let n = Darwin.write(fd, base + written, buffer.count - written)
+                guard n > 0 else { return false }
+                written += n
+            }
+            return true
+        }
+
+        guard wroteAll, fsync(fd) == 0 else {
+            close(fd)
+            try? FileManager.default.removeItem(at: tempURL)
+            return false
+        }
+        close(fd)
+
+        guard rename(tempURL.path, file.path) == 0 else {
+            try? FileManager.default.removeItem(at: tempURL)
+            return false
+        }
+        return true
     }
 }
 

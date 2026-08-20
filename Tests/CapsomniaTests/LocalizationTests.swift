@@ -59,6 +59,22 @@ final class LocalizationTests: XCTestCase {
         }
     }
 
+    /// D6's exit-restore-failure alert is a plain `NSAlert`, not the glass popover, but
+    /// it is still user-visible text and still has to exist in every shipped language —
+    /// a blank title/button on a safety-critical alert is worse than a missing menu
+    /// label, since this alert is the user's only path back to a stuck system setting.
+    func testEveryLanguageHasExitRestoreFailureAlertStrings() {
+        for language in AppLanguage.allCases {
+            let strings = AppStrings.localized(for: language)
+
+            XCTAssertFalse(strings.exitRestoreFailedTitle.isEmpty, "\(language)")
+            XCTAssertFalse(strings.exitRestoreFailedMessage.isEmpty, "\(language)")
+            XCTAssertFalse(strings.copyCommand.isEmpty, "\(language)")
+            XCTAssertFalse(strings.tryAgain.isEmpty, "\(language)")
+            XCTAssertFalse(strings.quitAnyway.isEmpty, "\(language)")
+        }
+    }
+
     func testTemplateFillsEveryOccurrenceAndLeavesTheRest() {
         XCTAssertEqual(TextTemplate.fill("{a} then {a} then {b}", ["a": 1, "b": 2]), "1 then 1 then 2")
         XCTAssertEqual(TextTemplate.fill("no tokens", ["a": 1]), "no tokens")
