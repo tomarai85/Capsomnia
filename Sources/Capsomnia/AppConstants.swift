@@ -145,6 +145,10 @@ struct AppStrings {
     /// in the log.
     let tooltipPowerUnknown: String
     let statusHeld: String
+    /// Sprint 2 (FINDINGS Defect 1/3): the status pill's tri-state third value — the app
+    /// has not confirmed the real sleep state (helper/read failing, or the very first
+    /// confirming read has not landed yet). Never shown as a confident ON/OFF.
+    let statusUnknown: String
     let batteryFloorHeldFormat: String
     let tooltipHeldFormat: String
     let batteryFloorOverride: String
@@ -196,7 +200,11 @@ struct AppStrings {
                 keepAwakeHeading: "Keep awake",
                 modeOff: "Off",
                 modeCapsLock: "Caps Lock",
-                modeAuto: "Auto (always)",
+                // Shortened from "Auto (always)" — Sprint 2's MenuHeaderFitTests caught
+                // "Keep awake · Auto (always)" overflowing beside the new "UNKNOWN" pill
+                // (7pt over, English only; the other 3 languages already fit). The fuller
+                // explanation stays in Settings (keepAwakeModeDesc), unaffected.
+                modeAuto: "Auto",
                 batteryFloorMenu: "Battery floor",
                 keepAwakeModeDesc: "Off = normal sleep. Caps Lock = awake while Caps Lock is on. Auto = always keep awake (for closing the lid and working remotely).",
                 batteryFloorDesc: "On battery, allow sleep at or below this level, so there is charge left in reserve instead of running the battery flat.",
@@ -204,6 +212,7 @@ struct AppStrings {
                 tooltipKeepAwakeOff: "Keep awake OFF: normal sleep",
                 tooltipPowerUnknown: "Keep awake ON — the power source cannot be read, so the battery floor is not being applied",
                 statusHeld: "PAUSED",
+                statusUnknown: "UNKNOWN",
                 batteryFloorHeldFormat: "Battery {battery}% · resumes {recover}%",
                 tooltipHeldFormat: "Paused by the battery floor: {battery}% is at or below {floor}%. Resumes at {recover}% or on AC.",
                 batteryFloorOverride: "Stay awake",
@@ -253,6 +262,7 @@ struct AppStrings {
                 tooltipKeepAwakeOff: "잠자기 방지 꺼짐: 평소 잠자기",
                 tooltipPowerUnknown: "잠자기 방지 켜짐 — 전원 상태를 읽을 수 없어 배터리 하한이 적용되지 않습니다",
                 statusHeld: "일시 중지",
+                statusUnknown: "미확인",
                 batteryFloorHeldFormat: "{battery}% · {recover}%에서 재개",
                 tooltipHeldFormat: "배터리 하한으로 중지됨: {battery}%가 {floor}% 이하입니다. {recover}% 또는 전원 연결 시 재개합니다.",
                 batteryFloorOverride: "그래도 유지",
@@ -302,6 +312,7 @@ struct AppStrings {
                 tooltipKeepAwakeOff: "スリープ抑止オフ: 通常のスリープ動作",
                 tooltipPowerUnknown: "スリープ抑止中 — 電源状態が読めないため、バッテリー下限は適用されていません",
                 statusHeld: "一時停止",
+                statusUnknown: "不明",
                 batteryFloorHeldFormat: "残量{battery}% · {recover}%で再開",
                 tooltipHeldFormat: "バッテリー下限で一時停止中: {battery}%は{floor}%以下です。{recover}%か電源接続で再開します。",
                 batteryFloorOverride: "無視して起こす",
@@ -351,6 +362,7 @@ struct AppStrings {
                 tooltipKeepAwakeOff: "防止睡眠已关闭：正常睡眠",
                 tooltipPowerUnknown: "防止睡眠已开启 — 无法读取电源状态，电量下限未生效",
                 statusHeld: "已暂停",
+                statusUnknown: "未知",
                 batteryFloorHeldFormat: "电量 {battery}% · {recover}% 恢复",
                 tooltipHeldFormat: "已被电量下限暂停：{battery}% 低于或等于 {floor}%。达到 {recover}% 或接通电源后恢复。",
                 batteryFloorOverride: "保持唤醒",

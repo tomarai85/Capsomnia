@@ -74,6 +74,30 @@ final class MenuHeaderFitTests: XCTestCase {
         }
     }
 
+    /// Sprint 2 (FINDINGS Defect 1/3): the UNKNOWN pill can appear beside the ordinary
+    /// mode-label subtitle — `heldByFloor` and `unknown` are mutually exclusive
+    /// (`StatusPillPresentation.choose` always prefers held), so that pairing is the
+    /// realistic worst case to measure, using the exact envelope formula
+    /// `testHeldSubtitleFitsBesideTheStatusPillInEveryLanguage` established. The widest of
+    /// the three mode labels is used, matching the file's convention of testing worst-case
+    /// values rather than whichever mode a human happened to be looking at.
+    func testUnknownPillFitsBesideTheLEDDotInEveryLanguage() {
+        for language in AppLanguage.allCases {
+            let strings = AppStrings.localized(for: language)
+            let modeLabels = [strings.modeOff, strings.modeCapsLock, strings.modeAuto]
+            let widestMode = modeLabels.max { width($0, size: 11) < width($1, size: 11) } ?? ""
+            let subtitle = "\(strings.keepAwakeHeading) · \(widestMode)"
+            let pill = width(strings.statusUnknown, size: 11, weight: .semibold) + pillHorizontalPadding
+            let available = menuWidth - headerHorizontalPadding - headerStackGaps
+                - ledDotWidth - headerSpacerMinimum - pill
+
+            XCTAssertLessThanOrEqual(
+                width(subtitle, size: 11), available,
+                "\(language): subtitle \"\(subtitle)\" truncates beside the \"\(strings.statusUnknown)\" pill"
+            )
+        }
+    }
+
     func testOverrideChipFitsBesideTheBatteryFloorLabelInEveryLanguage() {
         for language in AppLanguage.allCases {
             let strings = AppStrings.localized(for: language)

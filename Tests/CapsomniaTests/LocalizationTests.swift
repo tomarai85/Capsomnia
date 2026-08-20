@@ -37,6 +37,10 @@ final class LocalizationTests: XCTestCase {
             let strings = AppStrings.localized(for: language)
 
             XCTAssertFalse(strings.statusHeld.isEmpty, "\(language)")
+            // Sprint 2 (FINDINGS Defect 1/3): the tri-state pill's third value must be
+            // sayable in every language too, or the "never display a state you have not
+            // observed" fix silently ships blank in three of the four languages.
+            XCTAssertFalse(strings.statusUnknown.isEmpty, "\(language)")
             XCTAssertFalse(strings.batteryFloorOverride.isEmpty, "\(language)")
             XCTAssertFalse(strings.batteryFloorOverrideActive.isEmpty, "\(language)")
             XCTAssertFalse(strings.tooltipKeepAwakeOn.isEmpty, "\(language)")

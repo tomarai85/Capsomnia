@@ -131,6 +131,30 @@ enum SleepStateReader {
     }
 }
 
+/// The tri-state the app actually knows about system sleep — derived only from a
+/// CONFIRMED read (`SleepStateReader.isDisabled()` agreeing with what was requested),
+/// never from the optimistically-set applied state. Spec Sprint 2 / FINDINGS Defect 1 +
+/// Defect 3: before this, a failing helper or verification read collapsed straight into
+/// a confident `OFF`, contradicting the menu-bar's own red error dot at the exact moment
+/// the app had no evidence about the real state.
+enum SleepStateObservation: Equatable {
+    case on, off, unknown
+
+    /// `lastConfirmed` is the last CONFIRMED value (`nil` before the first confirming
+    /// read has ever landed); `helperFailing` mirrors whether the helper call or its
+    /// verification read is currently failing. A failing helper always wins to
+    /// `.unknown` regardless of `lastConfirmed` — a past confirmation describes the
+    /// past, not now.
+    static func from(lastConfirmed: Bool?, helperFailing: Bool) -> SleepStateObservation {
+        guard !helperFailing else { return .unknown }
+        switch lastConfirmed {
+        case .some(true): return .on
+        case .some(false): return .off
+        case .none: return .unknown
+        }
+    }
+}
+
 /// One-shot claim shared between `applicationWillTerminate` and the SIGINT/SIGTERM
 /// signal handler — proven necessary 2026-07-31: both fired for the same termination
 /// and both raced independent `sudo` calls. Backed by `OSAllocatedUnfairLock`, not an

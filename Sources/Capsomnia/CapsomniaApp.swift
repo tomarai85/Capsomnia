@@ -6,6 +6,17 @@ import Foundation
 final class Capsomnia: NSObject, NSApplicationDelegate {
     private var lastAppliedState: Bool?
     private var failedSleepState: Bool?
+    /// The last value a CONFIRMED read (`SleepStateReader.isDisabled()` agreeing with
+    /// what was requested) actually returned — `nil` before the first confirming read of
+    /// this process has ever landed. Distinct from `lastAppliedState`, which is set
+    /// optimistically before the confirming read happens. Only these two feed
+    /// `observedSleepState`; every display call site reads that, never `lastAppliedState`.
+    private var lastConfirmedSleepState: Bool?
+    /// The tri-state the UI actually displays (Sprint 2, FINDINGS Defect 1/3) — derived
+    /// from `lastConfirmedSleepState` and whether the helper/verification read is
+    /// currently failing, recomputed inside `markSleepStateConfirmed`/`markSleepStateFailed`,
+    /// the only two places that change either input.
+    private var observedSleepState: SleepStateObservation = .unknown
     // Monotonic, not wall-clock. `Date` arithmetic silently stretched every one of
     // these windows by however far the clock jumped backwards — an NTP correction
     // shortly after boot is the ordinary way that happens — and stale state was
@@ -287,8 +298,13 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         showSettingsWindow(page: currentSettingsPage())
     }
 
-    /// The state Capsomnia is acting on for status display: the last state it applied,
-    /// falling back to the mode's intent before the first apply.
+    /// The state Capsomnia is acting on: the last state it applied, falling back to the
+    /// mode's intent before the first apply. Used ONLY by
+    /// `setDisplaySleepOnLidClose` → `evaluateDisplaySleepForClosedLid` (an intent, not a
+    /// display, decision) — every purely-display caller was redirected in Sprint 2 to
+    /// `observedCapsLockState` below, because this property can say "on" while the app
+    /// has not actually confirmed that, which is exactly what FINDINGS Defect 1/3 exist
+    /// to stop the UI from asserting.
     private var currentCapsLockState: Bool {
         if let lastAppliedState {
             return lastAppliedState
@@ -303,13 +319,20 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The confirmed on/off value for display, derived from `observedSleepState`. Only
+    /// meaningful once `observedSleepState != .unknown` — `refreshStatus` checks that
+    /// first and paints the error icon instead of consulting this.
+    private var observedCapsLockState: Bool {
+        observedSleepState == .on
+    }
+
     private func syncStatusItemVisibility() {
         if Preferences.showMenuBarIcon {
             if statusItem == nil {
                 installStatusItem()
             }
 
-            refreshStatus(capsLockOn: currentCapsLockState)
+            refreshStatus(capsLockOn: observedCapsLockState)
         } else if let item = statusItem {
             NSStatusBar.system.removeStatusItem(item)
             statusItem = nil
@@ -371,6 +394,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             openCapsomnia: s.openCapsomnia,
             quit: s.quit,
             statusHeld: s.statusHeld,
+            statusUnknown: s.statusUnknown,
             batteryFloorHeldFormat: s.batteryFloorHeldFormat,
             batteryFloorOverride: s.batteryFloorOverride,
             batteryFloorOverrideActive: s.batteryFloorOverrideActive,
@@ -385,13 +409,14 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         model.floorPercent = Preferences.batteryFloorPercent
         model.showMenuBarIcon = Preferences.showMenuBarIcon
         model.language = Preferences.language
-        model.keepingAwake = currentCapsLockState
+        // Replaces the old keepingAwake + helperFailing pair with the single tri-state
+        // source of truth (Sprint 2, FINDINGS Defect 1/3).
+        model.observedSleepState = observedSleepState
         model.heldByFloor = keepAwakeStatus.isHeldByFloor
         model.overridingFloor = keepAwakeStatus.isOverriding
         model.batteryPercent = keepAwakeStatus.percent ?? cachedBattery?.percent
         model.floorRecoverPercent = batteryFloorRecoverPercent
         model.floorCriticalPercent = BatteryFloorPolicy.criticalPercent
-        model.helperFailing = failedSleepState != nil
     }
 
     /// Kept as the single "menu changed" entry point so the existing setters can call it
@@ -426,7 +451,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         }
         rebuildStatusMenu()
         applyCurrentCapsLockState(reason: "mode_change")
-        refreshStatus(capsLockOn: currentCapsLockState)
+        refreshStatus(capsLockOn: observedCapsLockState)
         log("preference keep_awake_mode=\(mode.rawValue)")
     }
 
@@ -521,7 +546,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         Preferences.language = language
         rebuildStatusMenu()
 
-        refreshStatus(capsLockOn: currentCapsLockState)
+        refreshStatus(capsLockOn: observedCapsLockState)
         settingsWindowController?.reloadText()
         log("preference language=\(language.rawValue)")
     }
@@ -696,7 +721,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         publishedStatus = keepAwakeStatus
         logStatusChange(from: previous)
         rebuildStatusMenu()
-        refreshStatus(capsLockOn: currentCapsLockState)
+        refreshStatus(capsLockOn: observedCapsLockState)
     }
 
     /// One line per change, never per poll. Diagnosing a released keep-awake used to mean
@@ -806,8 +831,13 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         // The menu bar goes to the error dot here, so the open menu must stop claiming
         // the state was applied: `lastAppliedState` is set optimistically before the
         // confirming read, and without this the popover showed a confident green ON
-        // beside a red menu-bar icon.
-        menuModel?.helperFailing = true
+        // beside a red menu-bar icon. Recomputed from `lastConfirmedSleepState`, not
+        // reset — a helper that fails after a prior confirmed ON must go to `.unknown`,
+        // not silently forget what was last actually confirmed.
+        observedSleepState = SleepStateObservation.from(
+            lastConfirmed: lastConfirmedSleepState, helperFailing: true
+        )
+        menuModel?.observedSleepState = observedSleepState
         updateStatusError()
     }
 
@@ -818,7 +848,10 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     ) {
         hasLoggedMissingSleepState = false
         failedSleepState = nil
-        menuModel?.helperFailing = false
+        lastConfirmedSleepState = capsLockOn
+        observedSleepState = SleepStateObservation.from(
+            lastConfirmed: lastConfirmedSleepState, helperFailing: false
+        )
         nextSleepStateRetryAt = nil
         nextSleepStateVerificationAt = now.advanced(by: .seconds(sleepStateVerificationInterval))
         if !capsLockOn {
@@ -826,7 +859,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         }
         // Keep the popover's status pill / LED live even while it is open (e.g. the
         // battery floor releasing keep-awake flips it to OFF without a reopen).
-        menuModel?.keepingAwake = capsLockOn
+        menuModel?.observedSleepState = observedSleepState
         syncStatusItemVisibility()
         evaluateDisplaySleepForClosedLid(capsLockOn: capsLockOn, reason: reason)
     }
@@ -928,7 +961,12 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     }
 
     private func refreshStatus(capsLockOn: Bool) {
-        if failedSleepState == nil {
+        // `observedSleepState`, not `failedSleepState == nil`: the single tri-state
+        // source of truth (Sprint 2, FINDINGS Defect 1/3) instead of a second,
+        // separately-maintained check. Equivalent on the failure path (both route to the
+        // error icon); at cold start, before the first confirming read, this now ALSO
+        // routes here — an intentional, minor, sub-poll-interval change (see spec Risks).
+        if observedSleepState != .unknown {
             updateStatus(capsLockOn: capsLockOn)
         } else {
             updateStatusError()

@@ -17,6 +17,7 @@ struct MenuStrings {
     var openCapsomnia: String
     var quit: String
     var statusHeld: String
+    var statusUnknown: String
     var batteryFloorHeldFormat: String
     var batteryFloorOverride: String
     var batteryFloorOverrideActive: String
@@ -33,14 +34,15 @@ final class MenuModel: ObservableObject {
     @Published var floorPercent: Int = 15
     @Published var showMenuBarIcon: Bool = true
     @Published var language: AppLanguage = .english
-    @Published var keepingAwake: Bool = false
+    /// The observed tri-state (Sprint 2, FINDINGS Defect 1/3) — replaces the old
+    /// `keepingAwake`/`helperFailing` pair. Derived only from a CONFIRMED read; never set
+    /// from the optimistically-applied state, so the pill cannot assert a confident
+    /// ON/OFF at the exact moment the app has no evidence about the real state.
+    @Published var observedSleepState: SleepStateObservation = .unknown
     /// The battery floor is holding keep-awake off even though the mode wants it on.
     @Published var heldByFloor: Bool = false
     /// The user consented to run below the floor.
     @Published var overridingFloor: Bool = false
-    /// The helper or its verification read is currently failing. The menu bar shows the
-    /// error dot for this; the menu must not keep asserting a confirmed state beside it.
-    @Published var helperFailing: Bool = false
     @Published var batteryPercent: Int?
     @Published var floorRecoverPercent: Int = 20
     @Published var floorCriticalPercent: Int = BatteryFloorPolicy.criticalPercent
@@ -54,9 +56,6 @@ final class MenuModel: ObservableObject {
     var onSelectLanguage: (AppLanguage) -> Void = { _ in }
     var onOpenCapsomnia: () -> Void = {}
     var onQuit: () -> Void = {}
-
-    /// Keeping the Mac awake AND the last apply was confirmed against the system.
-    var confirmedAwake: Bool { keepingAwake && !helperFailing }
 
     init(strings: MenuStrings) {
         self.strings = strings
@@ -77,6 +76,47 @@ private enum Palette {
 }
 
 private let menuWidth: CGFloat = 300
+
+// MARK: - Status presentation
+
+/// The single value that drives both the header's LED dot and its status pill, so the
+/// two cannot disagree by construction (the concrete fix for FINDINGS Defect 1: before
+/// this, `LEDDot` and `statusPill` each derived their own Bools from `confirmedAwake` /
+/// `heldByFloor` independently — a future edit to one without the other could silently
+/// reintroduce the contradiction this sprint exists to remove).
+enum StatusPillPresentation: Equatable {
+    case held, on, off, unknown
+
+    /// `.unknown` outranks `heldByFloor`, and the order matters. "Held" is not only a
+    /// statement about policy — to the person reading it, it also says the Mac is free to
+    /// sleep right now, which is a claim about the SYSTEM, and it is exactly the claim
+    /// the app cannot make while its helper or its verification read is failing. Letting
+    /// held win there also put the popover's calm "PAUSED" beside the menu bar's red
+    /// error dot: the same two-surfaces-disagreeing defect this sprint exists to remove,
+    /// moved rather than fixed. Below `.unknown`, held still wins over on/off, because
+    /// "off because the floor stepped in" and "off because you asked" are different facts.
+    static func choose(observed: SleepStateObservation, heldByFloor: Bool) -> StatusPillPresentation {
+        if observed == .unknown { return .unknown }
+        if heldByFloor { return .held }
+        switch observed {
+        case .on: return .on
+        case .off: return .off
+        case .unknown: return .unknown
+        }
+    }
+
+    /// `.held`/`.unknown` route through the localizable `MenuStrings` object; `.on`/`.off`
+    /// stay the existing hardcoded `"ON"`/`"OFF"` — matching current behavior, unchanged
+    /// by this sprint.
+    func title(strings: MenuStrings) -> String {
+        switch self {
+        case .held: return strings.statusHeld
+        case .on: return "ON"
+        case .off: return "OFF"
+        case .unknown: return strings.statusUnknown
+        }
+    }
+}
 
 // MARK: - Root view
 
@@ -146,8 +186,13 @@ struct CapsomniaMenuView: View {
     // MARK: Header
 
     private var header: some View {
-        HStack(spacing: 11) {
-            LEDDot(on: model.confirmedAwake, held: model.heldByFloor)
+        // Computed once and handed to both the dot and the pill, so the two surfaces
+        // cannot disagree by construction — see `StatusPillPresentation`.
+        let presentation = StatusPillPresentation.choose(
+            observed: model.observedSleepState, heldByFloor: model.heldByFloor
+        )
+        return HStack(spacing: 11) {
+            LEDDot(presentation: presentation)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.strings.appName)
                     .font(.system(size: 15, weight: .semibold))
@@ -158,7 +203,7 @@ struct CapsomniaMenuView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            statusPill
+            statusPill(presentation)
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
@@ -193,27 +238,38 @@ struct CapsomniaMenuView: View {
         }
     }
 
-    /// Three states, not two: OFF because you asked for it and OFF because the battery
-    /// floor stepped in are different facts. Held reads as an outlined pill — armed, not
-    /// running — so it is distinguishable from plain OFF at a glance.
-    private var statusPill: some View {
-        // `confirmedAwake`, not `keepingAwake`: the applied state is recorded optimistically
-        // before the confirming read, so while the helper is failing this would otherwise
-        // show a confident green ON next to the menu bar's red error dot.
-        let awake = model.confirmedAwake
-        let title = model.heldByFloor ? model.strings.statusHeld : (awake ? "ON" : "OFF")
-        let accented = awake || model.heldByFloor
-        return Text(title)
+    /// Four states, not two: OFF because you asked for it, OFF because the battery floor
+    /// stepped in, and UNKNOWN because the app has not confirmed the real state are three
+    /// different facts (Sprint 2, FINDINGS Defect 1). Held reads as an outlined pill —
+    /// armed, not running; unknown reuses the menu-bar error dot's red (Design Decision
+    /// D1) — so all four are distinguishable from each other at a glance.
+    private func statusPill(_ presentation: StatusPillPresentation) -> some View {
+        let (foreground, fill, stroke) = pillColors(for: presentation)
+        return Text(presentation.title(strings: model.strings))
             .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(awake ? Palette.led : (model.heldByFloor ? Palette.led.opacity(0.75) : Palette.textDim))
+            .foregroundStyle(foreground)
             .padding(.horizontal, 9)
             .padding(.vertical, 4)
-            .background(
-                Capsule().fill(awake ? Palette.led.opacity(0.14) : Palette.surface.opacity(0.6))
-            )
-            .overlay(
-                Capsule().stroke(accented ? Palette.led.opacity(0.35) : Palette.border, lineWidth: 1)
-            )
+            .background(Capsule().fill(fill))
+            .overlay(Capsule().stroke(stroke, lineWidth: 1))
+    }
+
+    /// `.on`/`.held`/`.off` are exactly the original three-state colors, unchanged.
+    /// `.unknown` mirrors `.on`'s structure (a tinted fill + matching stroke) in
+    /// `Brand`'s red, so it reads with the same weight as a confirmed state — appropriate
+    /// for a safety app, per Design Decision D1.
+    private func pillColors(for presentation: StatusPillPresentation) -> (foreground: Color, fill: Color, stroke: Color) {
+        switch presentation {
+        case .on:
+            return (Palette.led, Palette.led.opacity(0.14), Palette.led.opacity(0.35))
+        case .held:
+            return (Palette.led.opacity(0.75), Palette.surface.opacity(0.6), Palette.led.opacity(0.35))
+        case .unknown:
+            let red = Color(nsColor: .systemRed)
+            return (red, red.opacity(0.14), red.opacity(0.35))
+        case .off:
+            return (Palette.textDim, Palette.surface.opacity(0.6), Palette.border)
+        }
     }
 
     // MARK: Keep-awake modes
@@ -523,24 +579,47 @@ struct CapsomniaMenuView: View {
 
 // MARK: - Small components
 
+/// Takes a `StatusPillPresentation` rather than two independent Bools — the concrete fix
+/// for FINDINGS Defect 1: one enum drives this AND the status pill, so they cannot
+/// disagree by construction. Held stays hollow (armed, not running); unknown reuses the
+/// menu-bar error dot's red (Design Decision D1), never the confident green.
 private struct LEDDot: View {
-    let on: Bool
-    /// Armed but held off. Hollow rather than another shade — the same distinction the
-    /// menu-bar icon makes, so the two never disagree about what state the app is in.
-    var held: Bool = false
+    let presentation: StatusPillPresentation
+    private static let unknownColor = Color(nsColor: .systemRed)
 
     var body: some View {
         Circle()
-            .fill(on ? Palette.led : Color(nsColor: Brand.offDot))
+            .fill(fillColor)
             .frame(width: 12, height: 12)
             .overlay(
-                Circle().stroke(
-                    on ? Palette.ledBright.opacity(0.9)
-                       : (held ? Palette.led.opacity(0.75) : Color(nsColor: Brand.offDotBorder)),
-                    lineWidth: held ? 1.5 : 1
-                )
+                Circle().stroke(strokeColor, lineWidth: presentation == .held ? 1.5 : 1)
             )
-            .shadow(color: on ? Palette.led.opacity(0.8) : .clear, radius: 5)
+            .shadow(color: shadowColor, radius: 5)
+    }
+
+    private var fillColor: Color {
+        switch presentation {
+        case .on: return Palette.led
+        case .unknown: return Self.unknownColor
+        case .held, .off: return Color(nsColor: Brand.offDot)
+        }
+    }
+
+    private var strokeColor: Color {
+        switch presentation {
+        case .on: return Palette.ledBright.opacity(0.9)
+        case .held: return Palette.led.opacity(0.75)
+        case .unknown: return Self.unknownColor.opacity(0.9)
+        case .off: return Color(nsColor: Brand.offDotBorder)
+        }
+    }
+
+    private var shadowColor: Color {
+        switch presentation {
+        case .on: return Palette.led.opacity(0.8)
+        case .unknown: return Self.unknownColor.opacity(0.8)
+        case .held, .off: return .clear
+        }
     }
 }
 
