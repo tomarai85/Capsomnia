@@ -50,6 +50,10 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var menuPresenter: MenuPanelPresenter?
     private var menuModel: MenuModel?
+    /// Sprint 3 (FINDINGS Defect 4): refreshed on-demand by `refreshForeignSleepBlockers()`
+    /// from `togglePopover()`'s opening branch only — never the 0.25s poll. Empty means
+    /// either no foreign blockers were found or the read failed; both render no subtitle.
+    private var foreignSleepBlockerNames: [String] = []
     private var settingsWindowController: SettingsWindowController?
     private let onImage = DotImage.make(color: Brand.led)
     private let offImage = DotImage.make(color: NSColor(calibratedWhite: 0.58, alpha: 1.0))
@@ -444,7 +448,8 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             batteryFloorHeldFormat: s.batteryFloorHeldFormat,
             batteryFloorOverride: s.batteryFloorOverride,
             batteryFloorOverrideActive: s.batteryFloorOverrideActive,
-            batteryFloorOverrideSubtitleFormat: s.batteryFloorOverrideSubtitleFormat
+            batteryFloorOverrideSubtitleFormat: s.batteryFloorOverrideSubtitleFormat,
+            foreignSleepBlockersSubtitleFormat: s.foreignSleepBlockersSubtitleFormat
         )
     }
 
@@ -460,6 +465,10 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         model.observedSleepState = observedSleepState
         model.heldByFloor = keepAwakeStatus.isHeldByFloor
         model.overridingFloor = keepAwakeStatus.isOverriding
+        // Sprint 3 (FINDINGS Defect 4): only ever populated by `refreshForeignSleepBlockers()`,
+        // called from `togglePopover()`'s opening branch — this just publishes whatever
+        // that last found, it never reads anything itself.
+        model.foreignSleepBlockerNames = foreignSleepBlockerNames
         model.batteryPercent = keepAwakeStatus.percent ?? cachedBattery?.percent
         model.floorRecoverPercent = batteryFloorRecoverPercent
         model.floorCriticalPercent = BatteryFloorPolicy.criticalPercent
@@ -477,9 +486,23 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         if menuPresenter.isShown {
             menuPresenter.close()
         } else {
+            // Sprint 3 (FINDINGS Defect 4): the ONLY call site for
+            // `SleepAssertionReader.foreignBlockers()` in the app — at most once per user
+            // click on the menu-bar icon, before the model is rebuilt so the popover opens
+            // already showing the answer. Never called from `applyCurrentCapsLockState`,
+            // `apply(capsLockOn:reason:)`, the 0.25s `Timer`, or any verification tick: the
+            // 0.25s poll must not gain a subprocess.
+            refreshForeignSleepBlockers()
             rebuildStatusMenu()
             menuPresenter.show(under: button)
         }
+    }
+
+    /// A read failure is treated exactly like "found nothing": both leave the array
+    /// empty, and `HeaderSubtitleKind.choose` renders no subtitle for either — fail-
+    /// closed, per D8 rule 4 (never render "0 apps blocking sleep").
+    private func refreshForeignSleepBlockers() {
+        foreignSleepBlockerNames = SleepAssertionReader.foreignBlockers() ?? []
     }
 
     /// Note what is NOT here: the hysteresis latch is not cleared. Choosing a mode says

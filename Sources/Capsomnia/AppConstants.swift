@@ -102,6 +102,14 @@ enum TextTemplate {
             partial.replacingOccurrences(of: "{\(pair.key)}", with: "\(pair.value)")
         }
     }
+
+    /// Same replace-only mechanism for values that are already text — still no
+    /// pluralization, still no locale-aware formatting, just the other value type.
+    static func fill(_ template: String, _ values: [String: String]) -> String {
+        values.reduce(template) { partial, pair in
+            partial.replacingOccurrences(of: "{\(pair.key)}", with: pair.value)
+        }
+    }
 }
 
 struct AppStrings {
@@ -157,6 +165,12 @@ struct AppStrings {
     let batteryFloorOverrideSubtitleFormat: String
     /// Tooltip: no chip beside it, so it has to name what it is on its own.
     let batteryFloorOverrideDetailFormat: String
+    /// Sprint 3 (FINDINGS Defect 4): shown only when Capsomnia is confirmed OFF and some
+    /// OTHER process still holds a system-sleep-preventing assertion — otherwise a
+    /// correct OFF looks like a lie. `{count}` is the de-duplicated process count after
+    /// `SleepAssertionReader`'s filtering (D8: never `powerd`, never display-only
+    /// assertions, never a bare zero).
+    let foreignSleepBlockersSubtitleFormat: String
     /// D6: shown in a plain `NSAlert` (not the glass popover) when the explicit Quit
     /// path's restore-at-exit fails.
     let exitRestoreFailedTitle: String
@@ -219,6 +233,7 @@ struct AppStrings {
                 batteryFloorOverrideActive: "Overriding",
                 batteryFloorOverrideSubtitleFormat: "{battery}% · sleeps at {critical}%",
                 batteryFloorOverrideDetailFormat: "Floor overridden · {battery}%, sleeps at {critical}%",
+                foreignSleepBlockersSubtitleFormat: "Off · held by {blockers}",
                 exitRestoreFailedTitle: "Couldn't restore sleep",
                 exitRestoreFailedMessage: "System sleep is still disabled. Run this command to fix it:",
                 copyCommand: "Copy Command",
@@ -269,6 +284,7 @@ struct AppStrings {
                 batteryFloorOverrideActive: "무시 중",
                 batteryFloorOverrideSubtitleFormat: "{battery}% · {critical}%에서 잠자기",
                 batteryFloorOverrideDetailFormat: "하한 무시 중 · {battery}%, {critical}%에서 잠자기",
+                foreignSleepBlockersSubtitleFormat: "꺼짐 · {blockers} 방해 중",
                 exitRestoreFailedTitle: "절전 모드를 되돌리지 못했습니다",
                 exitRestoreFailedMessage: "시스템 절전이 아직 비활성화되어 있습니다. 아래 명령을 실행하세요:",
                 copyCommand: "명령 복사",
@@ -319,6 +335,7 @@ struct AppStrings {
                 batteryFloorOverrideActive: "無視中",
                 batteryFloorOverrideSubtitleFormat: "残量{battery}% · {critical}%でスリープ",
                 batteryFloorOverrideDetailFormat: "下限を無視中 · {battery}%、{critical}%でスリープ",
+                foreignSleepBlockersSubtitleFormat: "オフ · {blockers} が抑止中",
                 exitRestoreFailedTitle: "スリープを戻せませんでした",
                 exitRestoreFailedMessage: "システムスリープがまだ無効です。次のコマンドを実行してください:",
                 copyCommand: "コマンドをコピー",
@@ -369,6 +386,7 @@ struct AppStrings {
                 batteryFloorOverrideActive: "忽略中",
                 batteryFloorOverrideSubtitleFormat: "电量 {battery}% · {critical}% 时睡眠",
                 batteryFloorOverrideDetailFormat: "正在忽略下限 · {battery}%，{critical}% 时睡眠",
+                foreignSleepBlockersSubtitleFormat: "关闭 · {blockers} 阻止中",
                 exitRestoreFailedTitle: "未能恢复睡眠",
                 exitRestoreFailedMessage: "系统睡眠仍处于禁用状态。请运行以下命令：",
                 copyCommand: "复制命令",

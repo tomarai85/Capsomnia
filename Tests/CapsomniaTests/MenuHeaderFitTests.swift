@@ -98,6 +98,40 @@ final class MenuHeaderFitTests: XCTestCase {
         }
     }
 
+    /// Sprint 3 (FINDINGS Defect 4, gated by Design Decision D8): the foreign-blockers
+    /// subtitle only ever shows beside the plain `"OFF"` pill — it requires `observed ==
+    /// .off` with no floor state active (`HeaderSubtitleKind.choose`), so `"OFF"` is the
+    /// exact pill to measure against, not a conservative stand-in. Count 9 matches the
+    /// file's own convention of not inventing a 3-digit case; D8 itself flags the copy as
+    /// sized "by eye" and defers the real check to this test — a failure here means
+    /// shorten that language's copy, never weaken the envelope.
+    func testForeignBlockersSubtitleFitsBesideTheStatusPillInEveryLanguage() {
+        // The realistic worst case, not a synthetic one: the longest process name that
+        // actually turns up holding a system-sleep assertion (`WindowServer`, 12) plus a
+        // two-digit remainder. A name of all-wide glyphs would still overrun any
+        // character cap — `.lineLimit(1)` on the subtitle is the backstop for that, and
+        // widening this envelope to accommodate a string macOS does not produce would
+        // make the test stop pinning the case that has to look right.
+        let worstCaseBlockers = ForeignBlockerSummary.render(
+            names: ["WindowServer"] + (1...20).map { "p\($0)" }
+        )
+        for language in AppLanguage.allCases {
+            let strings = AppStrings.localized(for: language)
+            let subtitle = TextTemplate.fill(
+                strings.foreignSleepBlockersSubtitleFormat,
+                ["blockers": worstCaseBlockers ?? ""]
+            )
+            let pill = width("OFF", size: 11, weight: .semibold) + pillHorizontalPadding
+            let available = menuWidth - headerHorizontalPadding - headerStackGaps
+                - ledDotWidth - headerSpacerMinimum - pill
+
+            XCTAssertLessThanOrEqual(
+                width(subtitle, size: 11), available,
+                "\(language): foreign-blockers subtitle \"\(subtitle)\" truncates beside the \"OFF\" pill"
+            )
+        }
+    }
+
     func testOverrideChipFitsBesideTheBatteryFloorLabelInEveryLanguage() {
         for language in AppLanguage.allCases {
             let strings = AppStrings.localized(for: language)

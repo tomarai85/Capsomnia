@@ -82,7 +82,8 @@ final class SleepStateObservationTests: XCTestCase {
             batteryFloorHeldFormat: "",
             batteryFloorOverride: "",
             batteryFloorOverrideActive: "",
-            batteryFloorOverrideSubtitleFormat: ""
+            batteryFloorOverrideSubtitleFormat: "",
+            foreignSleepBlockersSubtitleFormat: ""
         )
 
         XCTAssertEqual(StatusPillPresentation.held.title(strings: strings), "PAUSED-TEST")

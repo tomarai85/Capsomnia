@@ -155,6 +155,125 @@ enum SleepStateObservation: Equatable {
     }
 }
 
+/// Reads `pmset -g assertions` to find OTHER processes preventing SYSTEM sleep — never
+/// Capsomnia itself: it works by flipping `disablesleep`, not by holding an
+/// `IOPMAssertion`, so every name this returns belongs to something else. Spec Sprint 3
+/// / FINDINGS Defect 4: when Capsomnia is confirmed OFF and the Mac still won't idle-
+/// sleep, this is what lets the popover say why instead of looking like it is lying.
+///
+/// On-demand only. `foreignBlockers()` has exactly one caller in the app,
+/// `togglePopover()`'s opening branch — never the 0.25s poll, never
+/// `applyCurrentCapsLockState`, never a verification tick. A real subprocess read must
+/// only run where the code already proves it is rare, the same reasoning that keeps
+/// `ClamshellStateReader.isClosed()` behind `ClosedLidCapsLockGuard`'s `@autoclosure`.
+enum SleepAssertionReader {
+    /// Only these two actually stop SYSTEM sleep. `PreventUserIdleDisplaySleep`,
+    /// `InternalPreventDisplaySleep`, `UserIsActive`, `NetworkClientActive`,
+    /// `BackgroundTask`, `ApplePushServiceTask`, `SoftwareUpdateTask`, `ExternalMedia`
+    /// describe something else and must not be reported as "blocking sleep" (D8 rule 1).
+    private static let systemSleepAssertionTypes: Set<String> = [
+        "PreventUserIdleSystemSleep", "PreventSystemSleep"
+    ]
+
+    /// D8 rule 2: excluded entirely, not filtered by assertion type. `powerd` holds
+    /// `PreventUserIdleSystemSleep` whenever the display is on — essentially always while
+    /// a human is at the machine — so it describes the machine's own state, not another
+    /// app's request, and it is the one owner guaranteed present in exactly the
+    /// situation this subtitle exists to explain. Counting it would make the new
+    /// subtitle read "1 app blocking sleep" permanently: a warning about nothing, the
+    /// same class of defect this whole harness run exists to fix, pointed the other way.
+    private static let excludedProcessNames: Set<String> = ["powerd"]
+
+    /// `nil` means the read itself failed — distinct from an empty array, which means
+    /// the read succeeded and found nothing. Callers must never render either as "0 apps
+    /// blocking sleep" (D8 rule 4): fail-closed, absence of evidence is not shown as
+    /// evidence of absence.
+    static func foreignBlockers() -> [String]? {
+        let result = CommandRunner.run("/usr/bin/pmset", ["-g", "assertions"])
+        guard result.status == 0 else { return nil }
+        return parse(result.stdout)
+    }
+
+    /// Pure function over `pmset -g assertions` text, so it is testable directly against
+    /// a captured real sample (D8 rule 5) instead of only through a live subprocess call.
+    /// Returns de-duplicated PROCESS NAMES, not one entry per assertion (D8 rule 3): three
+    /// `caffeinate` processes are one answer to "what is keeping this awake", not three.
+    static func parse(_ output: String) -> [String] {
+        var seen = Set<String>()
+        var names: [String] = []
+
+        for line in output.split(whereSeparator: { $0.isNewline }) {
+            guard let pidRange = line.range(of: "pid ") else { continue }
+            let afterPid = line[pidRange.upperBound...]
+            guard let openParen = afterPid.firstIndex(of: "("),
+                  let closeParen = afterPid.firstIndex(of: ")"),
+                  openParen < closeParen else { continue }
+            let processName = String(afterPid[afterPid.index(after: openParen)..<closeParen])
+
+            guard !excludedProcessNames.contains(processName) else { continue }
+            guard systemSleepAssertionTypes.contains(where: { line.contains($0) }) else { continue }
+            guard seen.insert(processName).inserted else { continue }
+            names.append(processName)
+        }
+
+        return names
+    }
+}
+
+/// Turns the blocker list into the short phrase the header can actually fit. A COUNT was
+/// the first version and it answered the wrong question: the user opening this menu is
+/// asking "what is keeping my Mac awake", and "3 apps" does not answer it — on this
+/// machine the answer is `caffeinate`, which points straight at the terminal sessions
+/// responsible. The remainder stays a count because the header is one line.
+enum ForeignBlockerSummary {
+    /// Long enough for every real process name observed on this machine (`caffeinate`
+    /// and `coreaudiod` are 10, `WindowServer` is 12) plus headroom, short enough that a
+    /// long one cannot run away with the line. This is a CHARACTER cap, so it cannot by
+    /// itself guarantee a pixel width — a name of all-wide glyphs still overruns. The
+    /// view's `.lineLimit(1)` truncation is the backstop for that; `MenuHeaderFitTests`
+    /// pins the realistic worst case, which is what actually has to look right.
+    static let maxNameLength = 14
+
+    /// `nil` when there is nothing to say — no blockers, or a read that failed. The
+    /// caller must render nothing at all in that case, never a zero (D8 rule 4).
+    static func render(names: [String]) -> String? {
+        guard let first = names.first else { return nil }
+        let name = first.count > maxNameLength
+            ? String(first.prefix(maxNameLength - 1)) + "\u{2026}"
+            : first
+        let others = names.count - 1
+        return others > 0 ? "\(name) +\(others)" : name
+    }
+}
+
+/// Which of the header's four subtitle reasons is showing, in priority order. Pure over
+/// values the caller already computes — the popover can never invent a reason the
+/// underlying booleans/counts don't support. Mirrors `StatusPillPresentation`: one enum
+/// drives the decision so a future edit to one branch can't silently disagree with
+/// another.
+enum HeaderSubtitleKind: Equatable {
+    case heldByFloor, overridingFloor, foreignBlockers(count: Int), modeLabel
+
+    /// Floor states keep the precedence Sprint 2 already established (checked first,
+    /// unconditionally win). Foreign blockers (Sprint 3, FINDINGS Defect 4) only ever
+    /// explain a CONFIRMED off — showing them while Capsomnia is ON would blame
+    /// something else for what Capsomnia itself is doing, and showing them while the
+    /// state is `.unknown` would dress up an unconfirmed state with a confident
+    /// explanation, which is exactly what Sprint 2 exists to prevent. A zero count never
+    /// surfaces the reason (D8 rule 4): that is `.modeLabel`, the ordinary fallback.
+    static func choose(
+        observed: SleepStateObservation,
+        heldByFloor: Bool,
+        overridingFloor: Bool,
+        foreignBlockerCount: Int
+    ) -> HeaderSubtitleKind {
+        if heldByFloor { return .heldByFloor }
+        if overridingFloor { return .overridingFloor }
+        if observed == .off, foreignBlockerCount > 0 { return .foreignBlockers(count: foreignBlockerCount) }
+        return .modeLabel
+    }
+}
+
 /// Serialises every privileged `on`/`off` call in the process, so the exit-time `off` is
 /// always the LAST mutation.
 ///

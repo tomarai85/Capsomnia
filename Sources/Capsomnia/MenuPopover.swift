@@ -22,6 +22,9 @@ struct MenuStrings {
     var batteryFloorOverride: String
     var batteryFloorOverrideActive: String
     var batteryFloorOverrideSubtitleFormat: String
+    /// Sprint 3 (FINDINGS Defect 4): shown only when confirmed OFF with foreign sleep
+    /// blockers present — see `HeaderSubtitleKind.foreignBlockers`.
+    var foreignSleepBlockersSubtitleFormat: String
 }
 
 /// Observable state the glass menu binds to. The app delegate owns this, refreshes it
@@ -43,6 +46,11 @@ final class MenuModel: ObservableObject {
     @Published var heldByFloor: Bool = false
     /// The user consented to run below the floor.
     @Published var overridingFloor: Bool = false
+    /// Sprint 3 (FINDINGS Defect 4): de-duplicated count of OTHER processes holding a
+    /// system-sleep-preventing assertion, refreshed on-demand by `togglePopover()`'s
+    /// opening branch — never on the 0.25s poll. 0 means either none found or the read
+    /// failed; both render no subtitle (`HeaderSubtitleKind.choose`).
+    @Published var foreignSleepBlockerNames: [String] = []
     @Published var batteryPercent: Int?
     @Published var floorRecoverPercent: Int = 20
     @Published var floorCriticalPercent: Int = BatteryFloorPolicy.criticalPercent
@@ -212,22 +220,44 @@ struct CapsomniaMenuView: View {
 
     /// Carries the reason, not just the setting. When the floor is holding keep-awake
     /// off, the mode alone is a lie by omission: the row still reads "Auto" while
-    /// nothing is being kept awake, which is how this looked like a malfunction.
-    /// The line is single-height in every state so the panel never changes size.
+    /// nothing is being kept awake, which is how this looked like a malfunction. Sprint 3
+    /// adds a fourth reason (FINDINGS Defect 4): a correct OFF that still can't sleep
+    /// because something else is holding it. The line is single-height in every state so
+    /// the panel never changes size.
     private var subtitle: String {
-        if model.heldByFloor {
+        switch headerSubtitleKind {
+        case .heldByFloor:
             return TextTemplate.fill(model.strings.batteryFloorHeldFormat, [
                 "battery": model.batteryPercent ?? 0,
                 "recover": model.floorRecoverPercent
             ])
-        }
-        if model.overridingFloor {
+        case .overridingFloor:
             return TextTemplate.fill(model.strings.batteryFloorOverrideSubtitleFormat, [
                 "battery": model.batteryPercent ?? 0,
                 "critical": model.floorCriticalPercent
             ])
+        case .foreignBlockers(let count):
+            // `count` is only the precedence signal; the line itself names the blocker,
+            // because "what is holding my Mac awake" is the question being asked.
+            _ = count
+            let blockers = ForeignBlockerSummary.render(names: model.foreignSleepBlockerNames) ?? ""
+            return TextTemplate.fill(model.strings.foreignSleepBlockersSubtitleFormat, ["blockers": blockers])
+        case .modeLabel:
+            return "\(model.strings.keepAwakeHeading) · \(currentModeLabel)"
         }
-        return "\(model.strings.keepAwakeHeading) · \(currentModeLabel)"
+    }
+
+    /// The single value that decides which of the four subtitle reasons is showing —
+    /// pure over values the model already carries, so the view can never show a reason
+    /// the underlying state doesn't actually support (mirrors why `header` computes one
+    /// `StatusPillPresentation` for both the dot and the pill).
+    private var headerSubtitleKind: HeaderSubtitleKind {
+        HeaderSubtitleKind.choose(
+            observed: model.observedSleepState,
+            heldByFloor: model.heldByFloor,
+            overridingFloor: model.overridingFloor,
+            foreignBlockerCount: model.foreignSleepBlockerNames.count
+        )
     }
 
     private var currentModeLabel: String {
