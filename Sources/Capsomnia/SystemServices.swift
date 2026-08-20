@@ -155,25 +155,111 @@ enum SleepStateObservation: Equatable {
     }
 }
 
-/// One-shot claim shared between `applicationWillTerminate` and the SIGINT/SIGTERM
-/// signal handler — proven necessary 2026-07-31: both fired for the same termination
-/// and both raced independent `sudo` calls. Backed by `OSAllocatedUnfairLock`, not an
-/// actor: the signal handler deliberately runs off the main actor (see
-/// `installSignalHandlers`), so a stuck main actor must not be able to make the app
-/// unkillable, which an actor hop into this type would reintroduce.
-final class ExitRestoreGate: @unchecked Sendable {
-    private let claimed = OSAllocatedUnfairLock(initialState: false)
+/// Serialises every privileged `on`/`off` call in the process, so the exit-time `off` is
+/// always the LAST mutation.
+///
+/// Without this, the app could exit reporting success while leaving the machine awake:
+/// the main actor issues `helper on`, SIGTERM lands mid-call, the signal handler runs
+/// `helper off`, sees status 0, deletes the breadcrumb and exits 0 — and the earlier
+/// `on` lands after it. Clean exit, `restore_off helper_status=0` in the log, no
+/// breadcrumb, `disablesleep=1` on the machine. That is the exact failure this whole
+/// change exists to remove, reproduced through its own fix.
+///
+/// Two mechanisms, because a lock alone is not enough:
+/// - `beginTermination()` latches a flag that makes every subsequent `on` refuse. An
+///   `on` that has not started yet can simply never start.
+/// - `withPriority` bounds how long the exit path will wait for an `on` that HAS already
+///   started. Every helper call in a month of logs returned in milliseconds; the 5s
+///   ceiling only matters when `sudo` is hung, and a hung `sudo` means the exit is lost
+///   anyway. Waiting forever would be worse than the race: it would put the signal
+///   handler back behind main-actor work, which is what made the app unkillable before.
+final class HelperCoordinator: @unchecked Sendable {
+    /// The one the app uses. Tests build their own, because `beginTermination` latches
+    /// permanently by design and a shared latch flipped by one test would leak into
+    /// every test after it.
+    static let shared = HelperCoordinator()
 
-    /// `true` for the first caller only. Every caller after — including a caller that
-    /// arrives while the first is still mid-restore — gets `false` and must not attempt
-    /// the restore itself.
+    private let lock = NSLock()
+    private let terminating = OSAllocatedUnfairLock(initialState: false)
+    private let priorityWait: TimeInterval
+
+    init(priorityWait: TimeInterval = 2.0) {
+        self.priorityWait = priorityWait
+    }
+
+    /// Latches "we are on the way out". Never unlatched: there is no path back from
+    /// termination, and a flag that could be cleared could be cleared by the wrong path.
+    func beginTermination() {
+        terminating.withLock { $0 = true }
+    }
+
+    var isTerminating: Bool {
+        terminating.withLock { $0 }
+    }
+
+    /// Runs `body` holding the helper lock. Used by the ordinary poll-driven path.
+    func serialized<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    /// Runs `body` holding the helper lock if it can be had within `priorityWait`, and
+    /// runs it anyway if it cannot — reporting which happened, so a contended exit is
+    /// visible in the log instead of being indistinguishable from a clean one.
+    func withPriority<T>(_ body: () -> T) -> (value: T, contended: Bool) {
+        let acquired = lock.lock(before: Date().addingTimeInterval(priorityWait))
+        defer { if acquired { lock.unlock() } }
+        return (body(), !acquired)
+    }
+}
+
+/// Coordinates the two exit paths — `applicationWillTerminate` and the SIGINT/SIGTERM
+/// handler — that both fire for one termination (proven 2026-07-31: both ran in the same
+/// second and both raced independent `sudo` calls).
+///
+/// Three states, not a one-shot Bool. A Bool made the loser return into silence, and a
+/// winner that then hung or stalled meant every later SIGTERM was swallowed too: the app
+/// became killable only by SIGKILL, which skips the restore entirely — strictly worse
+/// than the race the gate was added to remove. The loser now waits, bounded, for the
+/// winner's result and exits with it.
+///
+/// Lock-backed rather than actor-backed on purpose: the signal handler deliberately runs
+/// off the main actor, and an actor hop would put it back behind a main actor that may
+/// be exactly what is stuck.
+final class ExitRestoreGate: @unchecked Sendable {
+    private let state = NSCondition()
+    private var claimedFlag = false
+    private var completion: Int32?
+
+    /// `true` for the first caller only.
     @discardableResult
     func claim() -> Bool {
-        claimed.withLock { alreadyClaimed in
-            if alreadyClaimed { return false }
-            alreadyClaimed = true
-            return true
+        state.lock()
+        defer { state.unlock() }
+        if claimedFlag { return false }
+        claimedFlag = true
+        return true
+    }
+
+    /// Publishes the winner's helper status and wakes every waiter.
+    func complete(status: Int32) {
+        state.lock()
+        completion = status
+        state.broadcast()
+        state.unlock()
+    }
+
+    /// Blocks until the winner publishes a status or `timeout` elapses. `nil` means the
+    /// winner never finished — the caller must then act on its own rather than hang.
+    func awaitCompletion(timeout: TimeInterval) -> Int32? {
+        state.lock()
+        defer { state.unlock() }
+        let deadline = Date().addingTimeInterval(timeout)
+        while completion == nil {
+            if !state.wait(until: deadline) { return nil }
         }
+        return completion
     }
 }
 
@@ -310,7 +396,37 @@ enum SleepStateBreadcrumbStore {
     /// the next launch logs a reconciliation finding that turns out to be harmless.
     @discardableResult
     static func clear(directory: URL = directoryURL, file: URL = fileURL) -> Bool {
-        (try? FileManager.default.removeItem(at: file)) != nil
+        guard (try? FileManager.default.removeItem(at: file)) != nil else {
+            // Already gone counts as cleared; anything else is a real failure the
+            // caller has to be able to see.
+            return !FileManager.default.fileExists(atPath: file.path)
+        }
+        // The unlink is not durable until the DIRECTORY entry is. Without this, a power
+        // loss right after a successful restore can resurrect the breadcrumb and make
+        // the next launch report an unclean exit that never happened.
+        syncDirectory(directory)
+        return true
+    }
+
+    /// `fsync` on a file persists its CONTENTS; it says nothing about the directory
+    /// entry that names it. A `rename()` or `unlink()` that has not been followed by an
+    /// `fsync` of the containing directory can be lost in a power failure — which is
+    /// precisely the event this file exists to survive.
+    private static func syncDirectory(_ directory: URL) {
+        let fd = Darwin.open(directory.path, O_RDONLY)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        _ = fsync(fd)
+    }
+
+    /// Gives an ownership claim back after a helper call that DEFINITELY changed nothing
+    /// (a real non-zero exit status, not a timeout — a timed-out call may well have
+    /// applied). Without this, a claim written before a failed `on` stands forever: the
+    /// next attempt sees `owned == true`, skips re-reading the prior state, and keeps
+    /// claiming a setting Capsomnia never actually set.
+    @discardableResult
+    static func releaseClaim(directory: URL = directoryURL, file: URL = fileURL) -> Bool {
+        clear(directory: directory, file: file)
     }
 
     private static func write(_ breadcrumb: SleepStateBreadcrumb, directory: URL, file: URL) -> Bool {
@@ -348,6 +464,7 @@ enum SleepStateBreadcrumbStore {
             try? FileManager.default.removeItem(at: tempURL)
             return false
         }
+        syncDirectory(directory)
         return true
     }
 }

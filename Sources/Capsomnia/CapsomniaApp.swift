@@ -17,6 +17,10 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     /// currently failing, recomputed inside `markSleepStateConfirmed`/`markSleepStateFailed`,
     /// the only two places that change either input.
     private var observedSleepState: SleepStateObservation = .unknown
+    /// Whether this off->on cycle has already written its durable breadcrumb. In memory
+    /// on purpose: the FILE records that a process was mid-`on`, which must survive the
+    /// process; this flag records that the write already happened, which must not.
+    private var hasRecordedThisOnCycle = false
     // Monotonic, not wall-clock. `Date` arithmetic silently stretched every one of
     // these windows by however far the clock jumped backwards — an NTP correction
     // shortly after boot is the ordinary way that happens — and stale state was
@@ -180,27 +184,53 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     /// `quitRestoreLedger` is what stops the `applicationWillTerminate` call
     /// that follows a `.terminateNow` return from repeating this same restore.
     private func performExplicitQuitRestore() -> NSApplication.TerminateReply {
-        let result = runHelper("off", timeout: Self.exitHelperTimeout)
-        log("quit restore_off helper_status=\(result.status) stdout=\(result.stdout) stderr=\(result.stderr)")
-        quitRestoreLedger.markHandled()
+        // Iteration, not recursion. "Try Again" used to call back into this function
+        // from inside the alert's own handler, so every click added a stack frame with
+        // no bound; a user facing a persistently failing helper could grow the stack
+        // until the process crashed — losing the restore, the log line and the
+        // breadcrumb together, which is the failure mode this alert exists to prevent.
+        while true {
+            HelperCoordinator.shared.beginTermination()
+            let (result, contended) = HelperCoordinator.shared.withPriority {
+                self.runHelper("off", timeout: Self.exitHelperTimeout)
+            }
+            log(
+                "quit restore_off helper_status=\(result.status) contended=\(contended) "
+                    + "stdout=\(result.stdout) stderr=\(result.stderr)"
+            )
+            quitRestoreLedger.markHandled()
 
-        guard result.status == 0 else {
-            let reply = presentRestoreFailureAlert()
-            if reply == .terminateCancel {
+            if result.status == 0 {
+                SleepStateBreadcrumbStore.clear()
+                return .terminateNow
+            }
+
+            switch presentRestoreFailureAlert() {
+            case .tryAgain:
+                continue
+            case .quitAnyway:
+                log("quit restore_off quit_anyway_after_failure")
+                return .terminateNow
+            case .cancel:
                 // The app keeps running, so the restore this flow claimed is no longer
                 // paid for: hand the debt back before the next termination arrives on a
                 // path that would otherwise trust the claim and skip the restore.
                 quitRestoreLedger.terminationCancelled()
+                return .terminateCancel
             }
-            return reply
         }
-        SleepStateBreadcrumbStore.clear()
-        return .terminateNow
+    }
+
+    /// What the user chose in the exit-restore-failure alert. Named rather than returned
+    /// as a `TerminateReply` so the retry branch is a loop control value instead of a
+    /// recursive call back into `performExplicitQuitRestore`.
+    private enum RestoreFailureChoice {
+        case tryAgain, quitAnyway, cancel
     }
 
     /// A plain `NSAlert`, deliberately outside the glass-panel visual system (spec D6).
     /// Never loops automatically — every additional attempt is one more explicit click.
-    private func presentRestoreFailureAlert() -> NSApplication.TerminateReply {
+    private func presentRestoreFailureAlert() -> RestoreFailureChoice {
         let strings = AppStrings.current()
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -225,12 +255,11 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             log("quit restore_off command_copied")
             // Cancel: give the user the chance to run the command themselves before
             // quitting for real, instead of racing them out the door.
-            return .terminateCancel
+            return .cancel
         case .alertSecondButtonReturn:
-            return performExplicitQuitRestore()
+            return .tryAgain
         default:
-            log("quit restore_off quit_anyway_after_failure")
-            return .terminateNow
+            return .quitAnyway
         }
     }
 
@@ -238,15 +267,32 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         guard shouldRestoreSleepOnTerminate, quitRestoreLedger.shouldRestoreOnWillTerminate else { return }
 
         guard Self.exitRestoreGate.claim() else {
+            // The signal handler is doing it. AppKit finishes the termination either
+            // way, so this path just steps aside rather than racing a second `sudo`.
             log("terminate restore_off skipped=already_claimed")
             return
         }
 
-        let result = runHelper("off", timeout: Self.exitHelperTimeout)
-        log("terminate restore_off helper_status=\(result.status) stdout=\(result.stdout) stderr=\(result.stderr)")
-        if result.status == 0 {
-            SleepStateBreadcrumbStore.clear()
+        HelperCoordinator.shared.beginTermination()
+        let (result, contended) = HelperCoordinator.shared.withPriority {
+            self.runHelper("off", timeout: Self.exitHelperTimeout)
         }
+        log(
+            "terminate restore_off helper_status=\(result.status) contended=\(contended) "
+                + "stdout=\(result.stdout) stderr=\(result.stderr)"
+        )
+        Self.exitRestoreGate.complete(status: result.status)
+
+        guard result.status == 0 else {
+            // D5 applied to this path too. Exiting 0 here reported a machine left
+            // `disablesleep=1` as a clean shutdown, so `KeepAlive={SuccessfulExit=false}`
+            // never brought the app back to finish the job. This only runs for
+            // system-initiated terminations — an explicit user Quit is handled in
+            // `applicationShouldTerminate` and never reaches here — so it cannot
+            // resurrect an app the user deliberately quit.
+            exit(ExitRestoreOutcome.exitCode(helperStatus: result.status))
+        }
+        SleepStateBreadcrumbStore.clear()
     }
 
     /// An advisory file lock decides who runs, not a PID comparison against
@@ -782,14 +828,23 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         }
 
         let mode = capsLockOn ? "on" : "off"
-        if capsLockOn, SleepStateBreadcrumbStore.read()?.owned != true {
-            // Read BEFORE the helper call, and only on the first attempt of this
-            // off->on cycle (retries would otherwise overwrite the true prior state
-            // with whatever a partially-succeeded earlier attempt already changed it
-            // to — see SleepStateBreadcrumbStore.markAttemptingOn's doc comment).
+        // Nothing new may be turned ON once an exit-time restore has begun: the exit
+        // `off` has to be the last mutation, and an `on` that has not started yet can
+        // simply never start.
+        if capsLockOn, HelperCoordinator.shared.isTerminating {
+            log("\(reason) keep_awake=on skipped=terminating")
+            return
+        }
+        if capsLockOn, !hasRecordedThisOnCycle {
+            // Read BEFORE the helper call, and only once per off->on cycle. The guard
+            // used to be `read()?.owned != true`, which is permanently true whenever
+            // ownership could not be claimed — so a retry loop re-ran a `pmset -g`
+            // subprocess, a file read, a JSON encode, an fsync and a rename on the main
+            // actor every five seconds while the comment claimed it happened once.
+            hasRecordedThisOnCycle = true
             SleepStateBreadcrumbStore.markAttemptingOn(priorSleepDisabled: SleepStateReader.isDisabled())
         }
-        let result = runHelper(mode)
+        let (result, _) = HelperCoordinator.shared.serialized { (self.runHelper(mode), false) }
         // `keep_awake=`, not `capslock=`. The parameter is named capsLockOn but every caller passes
         // desiredKeepAwake(reason:) -- the DECISION, not the key. So in auto mode this line printed
         // `capslock=on` in the same second that logStatusChange printed `capslock_flag=off`, and the
@@ -802,6 +857,15 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         log("\(reason) keep_awake=\(mode) helper_status=\(result.status) stdout=\(result.stdout) stderr=\(result.stderr)")
 
         guard result.status == 0 else {
+            // A DEFINITE failure (a real non-zero exit) changed nothing, so an ownership
+            // claim written just before it is a claim to something that never happened —
+            // and left standing it would let a later reconciliation clear a
+            // `disablesleep=1` that some other tool set. A timeout (`timedOutStatus`) is
+            // deliberately excluded: a call that never answered may well have applied.
+            if capsLockOn, result.status != CommandRunner.timedOutStatus {
+                SleepStateBreadcrumbStore.releaseClaim()
+                hasRecordedThisOnCycle = false
+            }
             markSleepStateFailed(capsLockOn, at: now, resetVerification: false)
             return
         }
@@ -856,6 +920,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         nextSleepStateVerificationAt = now.advanced(by: .seconds(sleepStateVerificationInterval))
         if !capsLockOn {
             SleepStateBreadcrumbStore.clear()
+            hasRecordedThisOnCycle = false
         }
         // Keep the popover's status pill / LED live even while it is open (e.g. the
         // battery floor releasing keep-awake flips it to OFF without a reopen).
@@ -1010,15 +1075,31 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
                 // AppKit's own termination sequence completes it, as it already did
                 // before this gate existed.
                 guard Self.exitRestoreGate.claim() else {
-                    Self.appendLog("signal=\(signalNumber) restore_off skipped=already_claimed")
-                    return
+                    // Do NOT return into silence. The first version of this gate did,
+                    // and a winner that then stalled meant every later SIGTERM was
+                    // swallowed too — the app became killable only by SIGKILL, which
+                    // skips the restore entirely. Wait, bounded, for the winner's
+                    // result and leave with it; if the winner never publishes one,
+                    // leave anyway, reporting failure rather than hanging forever.
+                    let winner = Self.exitRestoreGate.awaitCompletion(
+                        timeout: Self.exitLoserWait
+                    )
+                    Self.appendLog(
+                        "signal=\(signalNumber) restore_off skipped=already_claimed "
+                            + "winner_status=\(winner.map(String.init) ?? "none")"
+                    )
+                    exit(ExitRestoreOutcome.exitCode(helperStatus: winner ?? 1))
                 }
 
-                let result = Self.restoreSleepOffHelper()
+                HelperCoordinator.shared.beginTermination()
+                let (result, contended) = HelperCoordinator.shared.withPriority {
+                    Self.restoreSleepOffHelper()
+                }
                 Self.appendLog(
                     "signal=\(signalNumber) restore_off helper_status=\(result.status) "
-                        + "stdout=\(result.stdout) stderr=\(result.stderr)"
+                        + "contended=\(contended) stdout=\(result.stdout) stderr=\(result.stderr)"
                 )
+                Self.exitRestoreGate.complete(status: result.status)
                 if result.status == 0 {
                     SleepStateBreadcrumbStore.clear()
                 }
@@ -1041,6 +1122,11 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     /// time to SIGKILL the app, which loses the restore AND the log line AND the
     /// breadcrumb write.
     private nonisolated static let exitHelperTimeout: TimeInterval = 2.0
+    /// How long the losing exit path waits for the winner's published result before
+    /// leaving on its own. Comfortably longer than `exitHelperTimeout` plus
+    /// `HelperCoordinator.priorityWait`, so a winner that is merely slow is waited for,
+    /// while a winner that is genuinely stuck cannot hold the process open.
+    private nonisolated static let exitLoserWait: TimeInterval = 5.0
 
     /// Putting sleep back must not need the main actor, for the same reason the handler
     /// does not run there.
