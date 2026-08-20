@@ -50,7 +50,7 @@ final class MenuModel: ObservableObject {
     /// system-sleep-preventing assertion, refreshed on-demand by `togglePopover()`'s
     /// opening branch — never on the 0.25s poll. 0 means either none found or the read
     /// failed; both render no subtitle (`HeaderSubtitleKind.choose`).
-    @Published var foreignSleepBlockerNames: [String] = []
+    @Published var foreignSleepBlockers: ForeignBlockerReading = .unavailable
     @Published var batteryPercent: Int?
     @Published var floorRecoverPercent: Int = 20
     @Published var floorCriticalPercent: Int = BatteryFloorPolicy.criticalPercent
@@ -240,7 +240,7 @@ struct CapsomniaMenuView: View {
             // `count` is only the precedence signal; the line itself names the blocker,
             // because "what is holding my Mac awake" is the question being asked.
             _ = count
-            let blockers = ForeignBlockerSummary.render(names: model.foreignSleepBlockerNames) ?? ""
+            let blockers = ForeignBlockerSummary.render(names: model.foreignSleepBlockers.names) ?? ""
             return TextTemplate.fill(model.strings.foreignSleepBlockersSubtitleFormat, ["blockers": blockers])
         case .modeLabel:
             return "\(model.strings.keepAwakeHeading) · \(currentModeLabel)"
@@ -256,7 +256,7 @@ struct CapsomniaMenuView: View {
             observed: model.observedSleepState,
             heldByFloor: model.heldByFloor,
             overridingFloor: model.overridingFloor,
-            foreignBlockerCount: model.foreignSleepBlockerNames.count
+            foreignBlockerCount: model.foreignSleepBlockers.names.count
         )
     }
 

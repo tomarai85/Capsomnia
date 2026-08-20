@@ -203,20 +203,62 @@ enum SleepAssertionReader {
         var names: [String] = []
 
         for line in output.split(whereSeparator: { $0.isNewline }) {
-            guard let pidRange = line.range(of: "pid ") else { continue }
-            let afterPid = line[pidRange.upperBound...]
-            guard let openParen = afterPid.firstIndex(of: "("),
-                  let closeParen = afterPid.firstIndex(of: ")"),
-                  openParen < closeParen else { continue }
-            let processName = String(afterPid[afterPid.index(after: openParen)..<closeParen])
+            guard let processName = processName(in: line),
+                  let type = assertionType(in: line) else { continue }
 
             guard !excludedProcessNames.contains(processName) else { continue }
-            guard systemSleepAssertionTypes.contains(where: { line.contains($0) }) else { continue }
+            guard systemSleepAssertionTypes.contains(type) else { continue }
             guard seen.insert(processName).inserted else { continue }
             names.append(processName)
         }
 
         return names
+    }
+
+    /// The owner field is `pid <n>(<name>)` and is terminated by `"): "`. Anchoring on
+    /// that pair rather than the FIRST `)` keeps a process name that itself contains
+    /// parentheses intact instead of truncating it at the first one.
+    private static func processName(in line: Substring) -> String? {
+        guard let pidRange = line.range(of: "pid ") else { return nil }
+        let afterPid = line[pidRange.upperBound...]
+        guard let openParen = afterPid.firstIndex(of: "("),
+              let closeRange = afterPid.range(of: "): ") else { return nil }
+        let start = afterPid.index(after: openParen)
+        guard start < closeRange.lowerBound else { return nil }
+        return String(afterPid[start..<closeRange.lowerBound])
+    }
+
+    /// The assertion type is the whitespace-delimited token immediately before
+    /// ` named:`. Scanning the WHOLE line for the type instead — which is what this did
+    /// first — matches the type appearing anywhere, including inside the quoted
+    /// human-readable assertion name that follows, so a display-only assertion whose
+    /// name happened to mention system sleep would be reported as a system-sleep
+    /// blocker. Comparing the captured token makes that impossible rather than unlikely.
+    private static func assertionType(in line: Substring) -> String? {
+        guard let namedRange = line.range(of: " named:") else { return nil }
+        return line[line.startIndex..<namedRange.lowerBound]
+            .split(whereSeparator: { $0.isWhitespace })
+            .last
+            .map(String.init)
+    }
+}
+
+/// What the last assertion read actually established. Three cases, not an array, because
+/// "the read failed" and "there is nothing holding the Mac awake" are different facts and
+/// collapsing them is how a fail-closed design turns fail-open: the header would render
+/// its ordinary subtitle either way, so a `pmset` failure would be indistinguishable from
+/// a clean answer — on a machine where that command is measured to fail intermittently.
+enum ForeignBlockerReading: Equatable {
+    /// The read succeeded and found these (already filtered and de-duplicated).
+    case known([String])
+    /// The read succeeded and found nothing.
+    case none
+    /// The read itself failed. Claim nothing.
+    case unavailable
+
+    var names: [String] {
+        if case .known(let names) = self { return names }
+        return []
     }
 }
 
@@ -267,6 +309,13 @@ enum HeaderSubtitleKind: Equatable {
         overridingFloor: Bool,
         foreignBlockerCount: Int
     ) -> HeaderSubtitleKind {
+        // `.unknown` first, exactly as `StatusPillPresentation.choose` does it. Without
+        // this the popover rendered a red UNKNOWN pill and, immediately beside it, the
+        // battery floor's confident "held — battery at N%, resumes at M%" — a specific
+        // claim about system behaviour made at the moment the app has no evidence for
+        // any of it. That is Defect 1's exact symptom, reintroduced in the one header
+        // surface Sprint 2 did not touch.
+        if observed == .unknown { return .modeLabel }
         if heldByFloor { return .heldByFloor }
         if overridingFloor { return .overridingFloor }
         if observed == .off, foreignBlockerCount > 0 { return .foreignBlockers(count: foreignBlockerCount) }

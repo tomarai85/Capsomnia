@@ -53,7 +53,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     /// Sprint 3 (FINDINGS Defect 4): refreshed on-demand by `refreshForeignSleepBlockers()`
     /// from `togglePopover()`'s opening branch only — never the 0.25s poll. Empty means
     /// either no foreign blockers were found or the read failed; both render no subtitle.
-    private var foreignSleepBlockerNames: [String] = []
+    private var foreignSleepBlockers: ForeignBlockerReading = .unavailable
     private var settingsWindowController: SettingsWindowController?
     private let onImage = DotImage.make(color: Brand.led)
     private let offImage = DotImage.make(color: NSColor(calibratedWhite: 0.58, alpha: 1.0))
@@ -206,6 +206,17 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
 
             if result.status == 0 {
                 SleepStateBreadcrumbStore.clear()
+                // Close the shared exit gate on the way out. Without this the signal
+                // handler has no way to know a Quit-driven restore already succeeded:
+                // a SIGTERM arriving before the process finishes leaving would run
+                // `off` a SECOND time, and if that redundant call failed for an
+                // unrelated teardown reason it would exit(1) — which, with
+                // `KeepAlive={SuccessfulExit=false}`, resurrects an app the user
+                // successfully quit. D5 says that must never happen to the Quit path.
+                // Only claimed on SUCCESS: a failure leaves the gate open on purpose, so
+                // a later SIGTERM still gets its own chance to put sleep back.
+                Self.exitRestoreGate.claim()
+                Self.exitRestoreGate.complete(status: 0)
                 return .terminateNow
             }
 
@@ -468,7 +479,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         // Sprint 3 (FINDINGS Defect 4): only ever populated by `refreshForeignSleepBlockers()`,
         // called from `togglePopover()`'s opening branch — this just publishes whatever
         // that last found, it never reads anything itself.
-        model.foreignSleepBlockerNames = foreignSleepBlockerNames
+        model.foreignSleepBlockers = foreignSleepBlockers
         model.batteryPercent = keepAwakeStatus.percent ?? cachedBattery?.percent
         model.floorRecoverPercent = batteryFloorRecoverPercent
         model.floorCriticalPercent = BatteryFloorPolicy.criticalPercent
@@ -502,7 +513,18 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     /// empty, and `HeaderSubtitleKind.choose` renders no subtitle for either — fail-
     /// closed, per D8 rule 4 (never render "0 apps blocking sleep").
     private func refreshForeignSleepBlockers() {
-        foreignSleepBlockerNames = SleepAssertionReader.foreignBlockers() ?? []
+        guard let names = SleepAssertionReader.foreignBlockers() else {
+            // A failed read is NOT "no blockers". Collapsing the two was the same
+            // fail-open shape as the defect this whole run exists to fix: the app would
+            // render its ordinary subtitle, indistinguishable from a successful read
+            // that found nothing, at the exact moment it had no evidence either way.
+            // Nothing is claimed on screen, and the failure is recorded so it is
+            // diagnosable rather than invisible.
+            foreignSleepBlockers = .unavailable
+            log("menu foreign_blockers read_failed")
+            return
+        }
+        foreignSleepBlockers = names.isEmpty ? .none : .known(names)
     }
 
     /// Note what is NOT here: the hysteresis latch is not cleared. Choosing a mode says
@@ -517,6 +539,12 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         if mode == .off, batteryFloorOverride {
             batteryFloorOverride = false
             log("battery_floor override_expired reason=mode_off")
+        }
+        if menuPresenter?.isShown == true {
+            // The panel is open and the user just changed the mode, so the blocker list
+            // shown beside it would otherwise be the one captured when the panel opened.
+            // Still a user action, still not the poll.
+            refreshForeignSleepBlockers()
         }
         rebuildStatusMenu()
         applyCurrentCapsLockState(reason: "mode_change")

@@ -66,3 +66,69 @@ final class HeaderSubtitleKindTests: XCTestCase {
         )
     }
 }
+
+/// The subtitle is the third status surface, and it was the one Sprint 2 did not touch.
+/// An Evaluator pass found it still rendering the battery floor's confident
+/// "held — battery at N%, resumes at M%" right beside the red UNKNOWN pill: a specific
+/// claim about system behaviour made at the exact moment the app has no evidence for any
+/// of it, which is Defect 1's symptom reintroduced through an unguarded path.
+final class HeaderSubtitleUnknownGateTests: XCTestCase {
+    /// Removing the `if observed == .unknown` line from `HeaderSubtitleKind.choose` makes
+    /// every case below return the confident reason instead of the neutral mode label.
+    func testAnUnconfirmedStateGetsNoConfidentExplanation() {
+        XCTAssertEqual(
+            HeaderSubtitleKind.choose(
+                observed: .unknown, heldByFloor: true, overridingFloor: false,
+                foreignBlockerCount: 0
+            ),
+            .modeLabel,
+            "the floor's 'resumes at N%' is a claim about the system, not about policy alone"
+        )
+        XCTAssertEqual(
+            HeaderSubtitleKind.choose(
+                observed: .unknown, heldByFloor: false, overridingFloor: true,
+                foreignBlockerCount: 0
+            ),
+            .modeLabel
+        )
+        XCTAssertEqual(
+            HeaderSubtitleKind.choose(
+                observed: .unknown, heldByFloor: false, overridingFloor: false,
+                foreignBlockerCount: 3
+            ),
+            .modeLabel,
+            "and we cannot name a culprit for a state we have not established"
+        )
+    }
+
+    /// The gate must not swallow the confident reasons when the state IS confirmed —
+    /// otherwise the fix above would silently delete the feature it is protecting.
+    func testAConfirmedStateStillGetsItsReason() {
+        XCTAssertEqual(
+            HeaderSubtitleKind.choose(
+                observed: .off, heldByFloor: true, overridingFloor: false,
+                foreignBlockerCount: 0
+            ),
+            .heldByFloor
+        )
+        XCTAssertEqual(
+            HeaderSubtitleKind.choose(
+                observed: .off, heldByFloor: false, overridingFloor: false,
+                foreignBlockerCount: 2
+            ),
+            .foreignBlockers(count: 2)
+        )
+    }
+}
+
+/// "The read failed" and "there is nothing holding the Mac awake" render identically, so
+/// the type has to keep them apart — collapsing them to `[]` was a fail-open on a command
+/// this machine is measured to fail intermittently.
+final class ForeignBlockerReadingTests: XCTestCase {
+    func testUnavailableIsNotTheSameAsEmpty() {
+        XCTAssertNotEqual(ForeignBlockerReading.unavailable, .none)
+        XCTAssertEqual(ForeignBlockerReading.unavailable.names, [])
+        XCTAssertEqual(ForeignBlockerReading.none.names, [])
+        XCTAssertEqual(ForeignBlockerReading.known(["caffeinate"]).names, ["caffeinate"])
+    }
+}

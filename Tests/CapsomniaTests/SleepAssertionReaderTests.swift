@@ -116,3 +116,46 @@ final class ForeignBlockerSummaryTests: XCTestCase {
         XCTAssertEqual(ForeignBlockerSummary.render(names: [name]), name)
     }
 }
+
+/// The parser used to ask `line.contains(type)`, which matches the type ANYWHERE on the
+/// line — including inside the quoted human-readable assertion name that follows it. A
+/// display-only assertion whose name merely mentions system sleep was therefore reported
+/// as a system-sleep blocker, and a process name containing parentheses was truncated at
+/// the first one.
+final class SleepAssertionParsingPrecisionTests: XCTestCase {
+    /// Restoring the whole-line `contains` check makes this report `diagnosticd`, which
+    /// is not preventing system sleep at all.
+    func testATypeNameQuotedInsideTheAssertionNameIsNotTreatedAsTheType() {
+        let output = """
+        Listed by owning process:
+           pid 900(diagnosticd): [0x0001] 00:00:10 PreventUserIdleDisplaySleep named: "PreventUserIdleSystemSleep diagnostics"
+        """
+
+        XCTAssertEqual(
+            SleepAssertionReader.parse(output), [],
+            "only the captured type token may decide, never a substring of the name"
+        )
+    }
+
+    /// ...and the real thing still parses, so the precision fix cannot have been bought
+    /// by simply matching nothing.
+    func testTheRealTypeTokenStillMatches() {
+        let output = """
+        Listed by owning process:
+           pid 3453(caffeinate): [0x0001] 00:02:58 PreventUserIdleSystemSleep named: "caffeinate command-line tool"
+        """
+
+        XCTAssertEqual(SleepAssertionReader.parse(output), ["caffeinate"])
+    }
+
+    /// Anchoring on `"): "` rather than the first `)` keeps a name containing parentheses
+    /// whole. Reverting to `firstIndex(of: ")")` reports "Foo" instead.
+    func testAProcessNameContainingParenthesesSurvivesIntact() {
+        let output = """
+        Listed by owning process:
+           pid 42(Foo (Helper)): [0x0001] 00:00:05 PreventSystemSleep named: "work"
+        """
+
+        XCTAssertEqual(SleepAssertionReader.parse(output), ["Foo (Helper)"])
+    }
+}
