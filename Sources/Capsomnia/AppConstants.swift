@@ -412,6 +412,44 @@ private enum PreferenceKey {
     static let forceWelcomeOnNextLaunch = "ForceWelcomeOnNextLaunch"
 }
 
+/// Which preferences must reach disk the moment they change, and which must not.
+///
+/// The split is not stylistic. A value the USER chose by hand is invisible if it is lost —
+/// they saw the app accept it and have no way to know it never landed. A value the ENGINE
+/// recomputes on every poll costs nothing if lost, and forcing it to disk four times a
+/// second would be its own defect. Keeping the two lists here, rather than as a habit spread
+/// across ten setters, is what stops a future edit from quietly moving one into the other.
+enum PreferenceDurability {
+    /// Written by a human action — a menu tap, a settings toggle. Must survive a crash.
+    static let userChosen: Set<String> = [
+        PreferenceKey.showMenuBarIcon,
+        PreferenceKey.language,
+        PreferenceKey.launchAtLogin,
+        PreferenceKey.displaySleepOnLidClose,
+        PreferenceKey.ignoreExternalCapsLockOffWhileLidClosed,
+        PreferenceKey.keepAwakeMode,
+        PreferenceKey.batteryFloorEnabled,
+        PreferenceKey.batteryFloorPercent,
+        PreferenceKey.didCompleteInitialSetup,
+        PreferenceKey.forceWelcomeOnNextLaunch
+    ]
+
+    /// Written from the 250ms poll and re-derived from a fresh battery read every tick.
+    /// Losing one is free; syncing one is not.
+    static let pollWritten: Set<String> = [
+        PreferenceKey.batteryFloorLatched,
+        PreferenceKey.batteryFloorLatchedFloor
+    ]
+
+    /// Every key the app persists. Kept beside the two lists so "is it classified" is a
+    /// question about one file, not about grepping ten setters.
+    static var allStoredKeys: Set<String> { userChosen.union(pollWritten) }
+
+    static func mustSyncImmediately(_ key: String) -> Bool {
+        userChosen.contains(key)
+    }
+}
+
 enum Preferences {
     private static let defaults = UserDefaults.standard
 
@@ -432,9 +470,34 @@ enum Preferences {
         ])
     }
 
+    /// Writes a preference the USER just chose, and forces it down to disk immediately.
+    ///
+    /// Observed live on 2026-08-21: the user picked Auto at 11:46:38, the app logged
+    /// `preference keep_awake_mode=auto` and acted on it, and eight minutes later a restart
+    /// came back up in `capsLock` — the value still on disk from the day before. The choice
+    /// had never left cfprefsd's memory. The same thing happened on 2026-08-15 (`auto`
+    /// logged 08-14T16:06, read back as `off` at the next start). From the outside this is
+    /// "I set it and it did not stay set", which is a large part of what "unstable" meant.
+    ///
+    /// `synchronize()` is deprecated and usually pointless — cfprefsd flushes on its own
+    /// schedule, which is fine when the process lives long enough to be flushed. This app
+    /// does not reliably live that long: three of twenty-nine starts had no restore line at
+    /// all (crash / SIGKILL / power loss), and it is also restarted by updates and logout.
+    ///
+    /// Deliberately NOT used by `batteryFloorLatched` / `batteryFloorLatchedFloor`: those
+    /// are written from the 250ms poll, and forcing a disk write four times a second is a
+    /// different bug. They are also recomputed from a fresh battery read on every poll, so
+    /// losing one costs nothing — unlike a choice the user made by hand and cannot see was
+    /// lost.
+    private static func setUserChoice(_ value: Any, forKey key: String) {
+        defaults.set(value, forKey: key)
+        guard PreferenceDurability.mustSyncImmediately(key) else { return }
+        defaults.synchronize()
+    }
+
     static var showMenuBarIcon: Bool {
         get { defaults.bool(forKey: PreferenceKey.showMenuBarIcon) }
-        set { defaults.set(newValue, forKey: PreferenceKey.showMenuBarIcon) }
+        set { setUserChoice(newValue, forKey: PreferenceKey.showMenuBarIcon) }
     }
 
     static var language: AppLanguage {
@@ -442,17 +505,17 @@ enum Preferences {
             AppLanguage(rawValue: defaults.string(forKey: PreferenceKey.language) ?? "")
                 ?? AppLanguage.defaultLanguage
         }
-        set { defaults.set(newValue.rawValue, forKey: PreferenceKey.language) }
+        set { setUserChoice(newValue.rawValue, forKey: PreferenceKey.language) }
     }
 
     static var launchAtLogin: Bool {
         get { defaults.bool(forKey: PreferenceKey.launchAtLogin) }
-        set { defaults.set(newValue, forKey: PreferenceKey.launchAtLogin) }
+        set { setUserChoice(newValue, forKey: PreferenceKey.launchAtLogin) }
     }
 
     static var displaySleepOnLidClose: Bool {
         get { defaults.bool(forKey: PreferenceKey.displaySleepOnLidClose) }
-        set { defaults.set(newValue, forKey: PreferenceKey.displaySleepOnLidClose) }
+        set { setUserChoice(newValue, forKey: PreferenceKey.displaySleepOnLidClose) }
     }
 
     /// While the lid is closed the built-in keyboard cannot be pressed, so a Caps Lock
@@ -461,7 +524,7 @@ enum Preferences {
     /// prevention. Ported from upstream v3.1.0 — see ClosedLidCapsLockGuard.
     static var ignoreExternalCapsLockOffWhileLidClosed: Bool {
         get { defaults.bool(forKey: PreferenceKey.ignoreExternalCapsLockOffWhileLidClosed) }
-        set { defaults.set(newValue, forKey: PreferenceKey.ignoreExternalCapsLockOffWhileLidClosed) }
+        set { setUserChoice(newValue, forKey: PreferenceKey.ignoreExternalCapsLockOffWhileLidClosed) }
     }
 
     static var keepAwakeMode: KeepAwakeMode {
@@ -469,12 +532,12 @@ enum Preferences {
             KeepAwakeMode(rawValue: defaults.string(forKey: PreferenceKey.keepAwakeMode) ?? "")
                 ?? .capsLock
         }
-        set { defaults.set(newValue.rawValue, forKey: PreferenceKey.keepAwakeMode) }
+        set { setUserChoice(newValue.rawValue, forKey: PreferenceKey.keepAwakeMode) }
     }
 
     static var batteryFloorEnabled: Bool {
         get { defaults.bool(forKey: PreferenceKey.batteryFloorEnabled) }
-        set { defaults.set(newValue, forKey: PreferenceKey.batteryFloorEnabled) }
+        set { setUserChoice(newValue, forKey: PreferenceKey.batteryFloorEnabled) }
     }
 
     /// Battery percentage at or below which keep-awake is released (0 = fall back to 15).
@@ -483,7 +546,7 @@ enum Preferences {
             let value = defaults.integer(forKey: PreferenceKey.batteryFloorPercent)
             return (value >= 5 && value <= 90) ? value : 15
         }
-        set { defaults.set(newValue, forKey: PreferenceKey.batteryFloorPercent) }
+        set { setUserChoice(newValue, forKey: PreferenceKey.batteryFloorPercent) }
     }
 
     /// The hysteresis latch, persisted. Kept out of memory-only state on purpose: a
@@ -505,7 +568,7 @@ enum Preferences {
 
     static var didCompleteInitialSetup: Bool {
         get { defaults.bool(forKey: PreferenceKey.didCompleteInitialSetup) }
-        set { defaults.set(newValue, forKey: PreferenceKey.didCompleteInitialSetup) }
+        set { setUserChoice(newValue, forKey: PreferenceKey.didCompleteInitialSetup) }
     }
 
     static func consumeForceWelcomeOnNextLaunch() -> Bool {
