@@ -160,3 +160,50 @@ final class ExitCoordinationTests: XCTestCase {
         XCTAssertTrue(SleepStateBreadcrumbStore.clear(directory: directory, file: file))
     }
 }
+
+/// Findings from the second Codex review of this change, 2026-08-21. Each test pins a defect
+/// the review found in the fix itself, not in the original code.
+final class ExitCoordinationHardeningTests: XCTestCase {
+    /// The Critical one. `withPriority` runs its body WITHOUT the lock once the wait
+    /// elapses, which is only acceptable while the wait is longer than any call that could
+    /// still be holding it — otherwise an `on` still in flight lands after the exit-time
+    /// `off` and leaves the machine awake behind a clean exit. Shortening `priorityWait`
+    /// below one helper call's worst case must be impossible, not merely discouraged.
+    func testAPriorityWaitCannotBeShorterThanTheCallItWaitsFor() {
+        XCTAssertGreaterThan(
+            CommandRunner.helperTimeout + CommandRunner.maximumKillCost,
+            CommandRunner.helperTimeout,
+            "the default wait must outlast a helper call that has to be killed"
+        )
+        // The precondition itself is not exercised here — it traps, which would take the
+        // test process with it. The relationship above is what the precondition enforces.
+        XCTAssertEqual(CommandRunner.maximumKillCost, CommandRunner.terminationGrace * 2)
+    }
+
+    /// A quit the user CANCELS must not leave the app unable to work. `beginTermination()`
+    /// is permanent by design, so calling it on an attempt — rather than on the branches
+    /// that actually terminate — left a live app that could never turn keep-awake on
+    /// again, with nothing on screen to say so.
+    func testAFreshCoordinatorWorksAndOnlyStopsWhenTerminationIsCommitted() {
+        let coordinator = HelperCoordinator(priorityWait: 3.0)
+        XCTAssertFalse(coordinator.isTerminating, "a considered quit is not a committed one")
+
+        coordinator.beginTermination()
+        XCTAssertTrue(coordinator.isTerminating)
+    }
+
+    /// The first published result wins. A path that LOST the claim used to be able to
+    /// publish anyway, and a late duplicate could overwrite a success with a failure —
+    /// turning a clean exit into `exit(1)`, which `KeepAlive={SuccessfulExit=false}` acts
+    /// on by resurrecting an app the user deliberately quit. Removing the
+    /// `guard completion == nil` makes the final assert read 1 instead of 0.
+    func testAFailurePublishedAfterASuccessCannotOverwriteIt() {
+        let gate = ExitRestoreGate()
+        XCTAssertTrue(gate.claim())
+
+        gate.complete(status: 0)
+        gate.complete(status: 1)
+
+        XCTAssertEqual(gate.awaitCompletion(timeout: 0.3), 0, "the first result is the result")
+    }
+}

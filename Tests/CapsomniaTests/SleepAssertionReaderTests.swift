@@ -66,10 +66,10 @@ final class SleepAssertionReaderTests: XCTestCase {
     /// `powerd` holding `PreventUserIdleSystemSleep`, `sharingd`, `coreaudiod`, and
     /// `WindowServer` holding only `UserIsActive` (not a system-sleep-blocking type).
     /// Reverting the `powerd` exclusion in `SleepAssertionReader` must fail this test.
-    func testParseOfRealCapturedSampleExcludesPowerdAndDedupesCaffeinate() {
+    func testParseOfRealCapturedSampleExcludesPowerdAndDedupesCaffeinate() throws {
         XCTAssertFalse(Self.capturedSample.isEmpty, "fixture did not load from \(Self.repoRoot)")
 
-        let names = SleepAssertionReader.parse(Self.capturedSample)
+        let names = try XCTUnwrap(SleepAssertionReader.parse(Self.capturedSample))
 
         XCTAssertEqual(Set(names), ["caffeinate", "sharingd", "coreaudiod"])
         XCTAssertEqual(names.count, 3, "caffeinate's 4 pids must collapse to 1 entry")
@@ -157,5 +157,49 @@ final class SleepAssertionParsingPrecisionTests: XCTestCase {
         """
 
         XCTAssertEqual(SleepAssertionReader.parse(output), ["Foo (Helper)"])
+    }
+}
+
+/// Also from the second Codex review: the names this parser returns are rendered into the
+/// app's own UI, and "I could not read the output" is not "nothing is holding your Mac
+/// awake".
+final class SleepAssertionSafetyTests: XCTestCase {
+    /// Rows exist and none of them parse — a localized build, a truncated read, a future
+    /// macOS. Returning `[]` there would state something about the system that was never
+    /// read. Removing the `ownerRows > 0 && parsedRows == 0` check makes this return `[]`.
+    func testRowsThatExistButCannotBeReadReportUnknownRatherThanNone() {
+        let output = """
+        Listed by owning process:
+           pid 900 <<unparseable owner field>> some assertion
+           pid 901 <<also unparseable>> another
+        """
+
+        XCTAssertNil(
+            SleepAssertionReader.parse(output),
+            "unreadable rows must not be reported as an empty answer"
+        )
+    }
+
+    /// No rows at all is a real, readable answer: nothing holds system sleep.
+    func testGenuinelyEmptyOutputIsAnAnswerNotAFailure() {
+        XCTAssertEqual(SleepAssertionReader.parse("Assertion status system-wide:"), [])
+    }
+
+    /// A process can be named with bidi-override or control characters, which reorders or
+    /// masks the text around it in the header line. Dropping the name is better than
+    /// rendering something the user would misread. Removing `displaySafeName` lets the
+    /// crafted name through.
+    func testANameCarryingBidiOrControlCharactersIsNotRendered() {
+        let crafted = "evil\u{202E}drowssap"
+        let output = """
+        Listed by owning process:
+           pid 42(\(crafted)): [0x1] 00:00:01 PreventUserIdleSystemSleep named: "x"
+           pid 43(caffeinate): [0x2] 00:00:01 PreventUserIdleSystemSleep named: "y"
+        """
+
+        XCTAssertEqual(
+            SleepAssertionReader.parse(output), ["caffeinate"],
+            "a blocker that cannot be named honestly is left unnamed"
+        )
     }
 }

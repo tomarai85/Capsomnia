@@ -20,8 +20,17 @@ enum CommandRunner {
     /// killed by anything short of SIGKILL, which skips the restore that puts system
     /// sleep back. A late answer is worthless here anyway; the poll will try again.
     static let defaultTimeout: TimeInterval = 5
+    /// The bound on every privileged helper call, ordinary or exit-time. Every such call in
+    /// a month of logs answered in milliseconds; the ceiling only matters when `sudo` is
+    /// wedged, and at that point a longer wait buys nothing but a smaller chance of the
+    /// exit-time restore happening at all. `HelperCoordinator` sizes its lock wait against
+    /// this, so the two cannot drift apart into a race.
+    static let helperTimeout: TimeInterval = 2.0
+    /// The most a timed-out child can cost on top of its timeout: one polite terminate
+    /// window plus one kill window.
+    static let maximumKillCost: TimeInterval = terminationGrace * 2
     /// How long a timed-out child gets to die politely before it is killed outright.
-    private static let terminationGrace: TimeInterval = 1
+    static let terminationGrace: TimeInterval = 1
     /// Distinct from any exit code a real command produces, so callers can tell
     /// "it failed" from "it never answered" in the log.
     static let timedOutStatus: Int32 = -2
@@ -191,28 +200,57 @@ enum SleepAssertionReader {
     static func foreignBlockers() -> [String]? {
         let result = CommandRunner.run("/usr/bin/pmset", ["-g", "assertions"])
         guard result.status == 0 else { return nil }
-        return parse(result.stdout)
+        return parse(result.stdout)   // nil also when rows exist but none are readable
     }
 
     /// Pure function over `pmset -g assertions` text, so it is testable directly against
     /// a captured real sample (D8 rule 5) instead of only through a live subprocess call.
     /// Returns de-duplicated PROCESS NAMES, not one entry per assertion (D8 rule 3): three
     /// `caffeinate` processes are one answer to "what is keeping this awake", not three.
-    static func parse(_ output: String) -> [String] {
+    static func parse(_ output: String) -> [String]? {
         var seen = Set<String>()
         var names: [String] = []
+        var ownerRows = 0
+        var parsedRows = 0
 
         for line in output.split(whereSeparator: { $0.isNewline }) {
+            guard line.contains("pid ") else { continue }
+            ownerRows += 1
             guard let processName = processName(in: line),
                   let type = assertionType(in: line) else { continue }
+            parsedRows += 1
 
             guard !excludedProcessNames.contains(processName) else { continue }
             guard systemSleepAssertionTypes.contains(type) else { continue }
-            guard seen.insert(processName).inserted else { continue }
-            names.append(processName)
+            guard let safeName = displaySafeName(processName) else { continue }
+            guard seen.insert(safeName).inserted else { continue }
+            names.append(safeName)
         }
 
+        // Rows existed and NONE of them parsed: the format is not what this code expects
+        // (a localized build, a truncated read, a future macOS). Returning an empty array
+        // there would tell the user "nothing is holding your Mac awake", which is a claim
+        // about the system made from a failure to read it — the same shape as the defect
+        // this whole change exists to remove. `nil` means "cannot say".
+        if ownerRows > 0 && parsedRows == 0 { return nil }
         return names
+    }
+
+    /// These names are rendered into the app's own UI. A process can be named with control
+    /// or bidirectional-override characters, which lets an attacker-chosen name reorder or
+    /// mask the text around it — a spoofing surface, not a code-execution one. Anything
+    /// carrying them is dropped rather than sanitised: a blocker that cannot be named
+    /// honestly is better left unnamed than shown as something it is not.
+    private static func displaySafeName(_ name: String) -> String? {
+        guard !name.isEmpty else { return nil }
+        for scalar in name.unicodeScalars {
+            if scalar.properties.isBidiControl { return nil }
+            if scalar.value < 0x20 || scalar.value == 0x7F { return nil }
+            if (0x200B...0x200F).contains(scalar.value) { return nil }
+            if (0x2028...0x202E).contains(scalar.value) { return nil }
+            if (0x2066...0x2069).contains(scalar.value) { return nil }
+        }
+        return name
     }
 
     /// The owner field is `pid <n>(<name>)` and is terminated by `"): "`. Anchoring on
@@ -355,8 +393,13 @@ final class HelperCoordinator: @unchecked Sendable {
         self.priorityWait = priorityWait
     }
 
-    /// Latches "we are on the way out". Never unlatched: there is no path back from
-    /// termination, and a flag that could be cleared could be cleared by the wrong path.
+    /// Latches "we are on the way out", refusing every subsequent `on`.
+    ///
+    /// Only call this once termination is COMMITTED. It was originally called before every
+    /// explicit-Quit restore attempt, including the ones the user then cancelled — so a
+    /// single failed Quit followed by "Copy command" left a live app that could never turn
+    /// keep-awake on again, for the rest of its life, with no way for the user to tell.
+    /// A quit being *considered* is not a quit.
     func beginTermination() {
         terminating.withLock { $0 = true }
     }
@@ -411,11 +454,16 @@ final class ExitRestoreGate: @unchecked Sendable {
     }
 
     /// Publishes the winner's helper status and wakes every waiter.
+    /// Publishes the winner's helper status. The FIRST publication wins: a second one —
+    /// from a path that lost the claim, or a late duplicate — must not be able to replace
+    /// a success with a failure and turn a clean exit into an `exit(1)` that KeepAlive
+    /// would act on.
     func complete(status: Int32) {
         state.lock()
+        defer { state.unlock() }
+        guard completion == nil else { return }
         completion = status
         state.broadcast()
-        state.unlock()
     }
 
     /// Blocks until the winner publishes a status or `timeout` elapses. `nil` means the
@@ -571,20 +619,21 @@ enum SleepStateBreadcrumbStore {
         }
         // The unlink is not durable until the DIRECTORY entry is. Without this, a power
         // loss right after a successful restore can resurrect the breadcrumb and make
-        // the next launch report an unclean exit that never happened.
-        syncDirectory(directory)
-        return true
+        // the next launch report an unclean exit that never happened. Returning true
+        // when that sync failed would report a clear this code cannot actually promise.
+        return syncDirectory(directory)
     }
 
     /// `fsync` on a file persists its CONTENTS; it says nothing about the directory
     /// entry that names it. A `rename()` or `unlink()` that has not been followed by an
     /// `fsync` of the containing directory can be lost in a power failure — which is
     /// precisely the event this file exists to survive.
-    private static func syncDirectory(_ directory: URL) {
+    @discardableResult
+    private static func syncDirectory(_ directory: URL) -> Bool {
         let fd = Darwin.open(directory.path, O_RDONLY)
-        guard fd >= 0 else { return }
+        guard fd >= 0 else { return false }
         defer { close(fd) }
-        _ = fsync(fd)
+        return fsync(fd) == 0
     }
 
     /// Gives an ownership claim back after a helper call that DEFINITELY changed nothing
@@ -603,6 +652,18 @@ enum SleepStateBreadcrumbStore {
             at: directory, withIntermediateDirectories: true
         )) != nil else {
             return false
+        }
+
+        // A crash between create and rename leaves the temp behind; over a long-lived
+        // install those accumulate silently. Cheap to sweep here, where the directory is
+        // already being written to.
+        if let stale = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil
+        ) {
+            for url in stale where url.lastPathComponent.hasPrefix(".sleep-state.")
+                && url.pathExtension == "tmp" {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
 
         // Same directory as the target: `rename()` is only atomic within one filesystem.

@@ -194,7 +194,10 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         // until the process crashed — losing the restore, the log line and the
         // breadcrumb together, which is the failure mode this alert exists to prevent.
         while true {
-            HelperCoordinator.shared.beginTermination()
+            // NOT `beginTermination()` here. This loop also runs for quits the user then
+            // cancels, and the latch is permanent by design — latching on an attempt left
+            // a live app that could never turn keep-awake on again. It is set below, only
+            // on the branches that actually return `.terminateNow`.
             let (result, contended) = HelperCoordinator.shared.withPriority {
                 self.runHelper("off", timeout: Self.exitHelperTimeout)
             }
@@ -205,18 +208,21 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             quitRestoreLedger.markHandled()
 
             if result.status == 0 {
+                HelperCoordinator.shared.beginTermination()
                 SleepStateBreadcrumbStore.clear()
-                // Close the shared exit gate on the way out. Without this the signal
-                // handler has no way to know a Quit-driven restore already succeeded:
-                // a SIGTERM arriving before the process finishes leaving would run
-                // `off` a SECOND time, and if that redundant call failed for an
-                // unrelated teardown reason it would exit(1) — which, with
-                // `KeepAlive={SuccessfulExit=false}`, resurrects an app the user
-                // successfully quit. D5 says that must never happen to the Quit path.
-                // Only claimed on SUCCESS: a failure leaves the gate open on purpose, so
-                // a later SIGTERM still gets its own chance to put sleep back.
-                Self.exitRestoreGate.claim()
-                Self.exitRestoreGate.complete(status: 0)
+                // Close the shared exit gate on the way out, so the signal handler cannot
+                // run `off` a second time and — if that redundant call failed for an
+                // unrelated teardown reason — exit(1) and let KeepAlive resurrect an app
+                // the user successfully quit.
+                //
+                // `complete` ONLY if this call actually won the claim. Publishing
+                // unconditionally meant that when the signal handler already owned the
+                // gate, this path published a result for someone else's claim; the real
+                // owner then carried on, overwrote it with its own failure and exited 1.
+                // A losing claimant has nothing to say about an outcome it did not produce.
+                if Self.exitRestoreGate.claim() {
+                    Self.exitRestoreGate.complete(status: 0)
+                }
                 return .terminateNow
             }
 
@@ -224,6 +230,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             case .tryAgain:
                 continue
             case .quitAnyway:
+                HelperCoordinator.shared.beginTermination()
                 log("quit restore_off quit_anyway_after_failure")
                 return .terminateNow
             case .cancel:
@@ -282,9 +289,17 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
         guard shouldRestoreSleepOnTerminate, quitRestoreLedger.shouldRestoreOnWillTerminate else { return }
 
         guard Self.exitRestoreGate.claim() else {
-            // The signal handler is doing it. AppKit finishes the termination either
-            // way, so this path just steps aside rather than racing a second `sudo`.
-            log("terminate restore_off skipped=already_claimed")
+            // Stepping aside is not enough. The signal handler runs OFF the main actor,
+            // and returning from this notification lets AppKit finish terminating — which
+            // can kill the winner mid-restore and leave `disablesleep=1` behind an exit
+            // that looked orderly. Hold the termination open, bounded, until the winner
+            // publishes. Blocking the main thread here is safe precisely because the
+            // winner is not on it.
+            let winner = Self.exitRestoreGate.awaitCompletion(timeout: Self.exitLoserWait)
+            log(
+                "terminate restore_off skipped=already_claimed "
+                    + "winner_status=\(winner.map(String.init) ?? "none")"
+            )
             return
         }
 
@@ -895,7 +910,9 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
             hasRecordedThisOnCycle = true
             SleepStateBreadcrumbStore.markAttemptingOn(priorSleepDisabled: SleepStateReader.isDisabled())
         }
-        let (result, _) = HelperCoordinator.shared.serialized { (self.runHelper(mode), false) }
+        let (result, _) = HelperCoordinator.shared.serialized {
+            (self.runHelper(mode, timeout: CommandRunner.helperTimeout), false)
+        }
         // `keep_awake=`, not `capslock=`. The parameter is named capsLockOn but every caller passes
         // desiredKeepAwake(reason:) -- the DECISION, not the key. So in auto mode this line printed
         // `capslock=on` in the same second that logStatusChange printed `capslock_flag=off`, and the
@@ -1172,7 +1189,7 @@ final class Capsomnia: NSObject, NSApplicationDelegate {
     /// condition, so a later retry cannot out-wait it; a retry only buys launchd more
     /// time to SIGKILL the app, which loses the restore AND the log line AND the
     /// breadcrumb write.
-    private nonisolated static let exitHelperTimeout: TimeInterval = 2.0
+    private nonisolated static let exitHelperTimeout: TimeInterval = CommandRunner.helperTimeout
     /// How long the losing exit path waits for the winner's published result before
     /// leaving on its own. Comfortably longer than `exitHelperTimeout` plus
     /// `HelperCoordinator.priorityWait`, so a winner that is merely slow is waited for,
