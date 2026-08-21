@@ -92,7 +92,19 @@ cat > "$LAUNCH_AGENT" <<EOF
 </plist>
 EOF
 
-/usr/bin/defaults write "$LABEL" ForceWelcomeOnNextLaunch -bool true
+# The app is adhoc/linker-signed, so every rebuild changes its code identity. macOS binds
+# ~/Library/Preferences/$LABEL.plist to the identity that created it via the `com.apple.macl`
+# xattr; after an identity change cfprefsd silently stops being able to write that file. The
+# app keeps accepting settings, keeps logging them, keeps acting on them for the life of the
+# process — and loses every one of them at the next launch. Measured 2026-08-21: the user's
+# mode change was accepted and applied at 12:05:00Z while the on-disk file still held a value
+# from 14:56 the previous day, and three restarts in a row reverted his choice.
+# Clearing the xattrs here costs nothing and stops that from returning on the next rebuild.
+PREFS_PLIST="$HOME/Library/Preferences/$LABEL.plist"
+if [[ -f "$PREFS_PLIST" ]]; then
+  /usr/bin/xattr -c "$PREFS_PLIST" 2>/dev/null || true
+fi
+
 launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT"
 launchctl enable "gui/$(id -u)/$LABEL"
 
